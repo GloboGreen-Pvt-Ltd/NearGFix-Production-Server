@@ -501,7 +501,10 @@ public class ReEstimateWorkflowService {
             restoreOriginal(t, r);
         }
         boolean repairStarted = hasEvent(t.getId(), "IN_REPAIR");
-        moveForward(t, repairStarted ? "IN_REPAIR" : "APPROVED");
+        // Rejected → the booking closes (CANCELLED); the original estimate stays
+        // restored above for the record and any advance goes through refunds.
+        if (approved) moveForward(t, repairStarted ? "IN_REPAIR" : "APPROVED");
+        else t.setStatus("CANCELLED");
         Ticket saved = ticketRepository.save(t);
         customerOrderMirrorService.mirrorOnUpsert(saved != null ? saved : t);
 
@@ -509,7 +512,10 @@ public class ReEstimateWorkflowService {
             emitOrUpdate(t.getId(), "CUSTOMER_APPROVED", TicketService.NOTE_APPROVED_RE_ESTIMATE, "SHOP", null, at);
         }
         emitOrUpdate(t.getId(), approved ? KEY_APPROVED : KEY_REJECTED, decisionNote(r), actor, null, at);
-        if (repairStarted) {
+        if (!approved) {
+            emitOrUpdate(t.getId(), "CANCELLED", "Closed — the customer rejected the re-estimate",
+                    "SHOP", null, at.plusMillis(1));
+        } else if (repairStarted) {
             emitOrUpdate(t.getId(), KEY_RESUMED,
                     "Repair work resumed after the re-estimate was " + (approved ? "approved" : "rejected"),
                     "SHOP", null, at.plusMillis(1));

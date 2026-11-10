@@ -325,8 +325,10 @@ class ReEstimateWorkflowServiceTest {
         assertEquals(Boolean.TRUE, ticket.getCustomerApproval(), "pre-revision approval restored");
         assertEquals(originalDelivery, ticket.getEstimatedDeliveryAt());
         assertEquals(0, new BigDecimal("1000").compareTo(ticket.getBalanceAmount()));
-        assertEquals("IN_REPAIR", ticket.getStatus());
-        assertTrue(eventKeys().containsAll(Set.of("RE_ESTIMATE_REJECTED", "REPAIR_WORK_RESUMED")));
+        // A rejected re-estimate closes the booking (no repair resume).
+        assertEquals("CANCELLED", ticket.getStatus());
+        assertTrue(eventKeys().containsAll(Set.of("RE_ESTIMATE_REJECTED", "CANCELLED")));
+        assertFalse(eventKeys().contains("REPAIR_WORK_RESUMED"));
         assertFalse(eventKeys().contains("CUSTOMER_REJECTED"));
         assertFalse(eventKeys().contains("RE_ESTIMATE_APPROVED"));
         verify(mirror, atLeastOnce()).mirrorOnUpsert(ticket);
@@ -389,6 +391,24 @@ class ReEstimateWorkflowServiceTest {
         assertTrue(eventKeys().contains("RE_ESTIMATE_APPROVED"));
     }
 
+    // ---- automatic transitions -------------------------------------------
+
+    @Test
+    void qualityCheckAutoAddsReadyAndIsRecordedOnce() {
+        ticketService.emitProgressStepEvent(shopId, ticketId, "QUALITY_CHECK_COMPLETED", null, "TECHNICIAN");
+        assertTrue(eventKeys().containsAll(Set.of("QUALITY_CHECK_COMPLETED", "READY")));
+        long before = events.size();
+        // The shop sliding QC afterwards is a no-op: one completion record only.
+        ticketService.emitProgressStepEvent(shopId, ticketId, "QUALITY_CHECK_COMPLETED", null, "OWNER");
+        assertEquals(before, events.size());
+    }
+
+    @Test
+    void invoiceGeneratedAutoAddsOutForDelivery() {
+        ticketService.emitProgressStepEvent(shopId, ticketId, "INVOICE_GENERATED", null, "OWNER");
+        assertTrue(eventKeys().containsAll(Set.of("INVOICE_GENERATED", "DELIVERED_PROCESSING")));
+    }
+
     // ---- completion gate -------------------------------------------------
 
     @Test
@@ -411,7 +431,12 @@ class ReEstimateWorkflowServiceTest {
     void customerRejectingTheRepairClosesTheAwaitingRevisionAndRestoresThePrice() {
         ReEstimateRevisionDtos.Revision open = submitAwaiting();
 
-        ticketService.emitProgressStepEvent(shopId, ticketId, "CUSTOMER_REJECTED", null, "OWNER");
+        // The shop must give the customer's reason; without one nothing changes.
+        assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                () -> ticketService.emitProgressStepEvent(shopId, ticketId, "CUSTOMER_REJECTED", null, "OWNER"));
+        assertEquals("AWAITING_APPROVAL", revisions.get(open.getId()).getStatus());
+
+        ticketService.emitProgressStepEvent(shopId, ticketId, "CUSTOMER_REJECTED", "Customer declined the cost", "OWNER");
 
         TicketReEstimateRevision r = revisions.get(open.getId());
         assertEquals("REJECTED", r.getStatus());
