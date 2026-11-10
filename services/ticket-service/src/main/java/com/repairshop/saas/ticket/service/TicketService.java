@@ -1318,6 +1318,13 @@ public class TicketService {
         if (!ALLOWED_PROGRESS_STEP_KEYS.contains(key)) {
             throw new IllegalArgumentException("Status key not allowed: " + key);
         }
+        // The shop records the customer's rejection on their behalf, so it must
+        // carry the customer's stated reason. Checked before anything changes.
+        if ("CUSTOMER_REJECTED".equals(key) && "OWNER".equalsIgnoreCase(actor == null ? "" : actor.trim())
+                && (note == null || note.isBlank())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Enter the customer's reason for rejecting the service.");
+        }
         // Repair Completed / QC / Ready / invoice wait for an open re-estimate (409 REESTIMATE_PENDING);
         // Customer Rejected / Cancelled / Return Delivery close it instead.
         reEstimateWorkflow.onProgressStep(t, key);
@@ -1338,9 +1345,12 @@ public class TicketService {
                             ? "This booking is closed — the device is with the customer."
                             : "This booking is closed — the repair was cancelled.");
         }
-        String text = note != null && !note.isBlank() ? note.trim() : defaultProgressLabel(key);
         String a = actor == null ? "" : actor.trim().toUpperCase();
         if (!ALLOWED_PROGRESS_ACTORS.contains(a)) a = "TECHNICIAN";
+        // Quality Check is one completion, by the employee OR the shop — a second
+        // slide (other app, double tap, retry) must not overwrite who/when.
+        if ("QUALITY_CHECK_COMPLETED".equals(key) && hasBookingEvent(t.getId(), key)) return;
+        String text = note != null && !note.isBlank() ? note.trim() : defaultProgressLabel(key);
         emitOrUpdateBookingEvent(t.getId(), key, text, a);
         // The BookingsHistory list reads ticket.status directly, so a work-status
         // event alone (Spare Parts Waiting, Repair Completed, Delivered to Customer,
@@ -1350,6 +1360,19 @@ public class TicketService {
         // forward (IN_REPAIR → READY → DELIVERED). Falls through silently when
         // the code isn't in master (defensive — keeps the event write working).
         advanceTicketStatusForWorkCode(t, key);
+        // Quality Check Completed (employee checklist or owner) → the device is
+        // ready: record "Ready for Delivery" too and move the booking to READY,
+        // so the shop's Delivery Ready tab picks it up without a manual step.
+        // Once only — a re-submitted QC leaves an existing READY row alone.
+        if ("QUALITY_CHECK_COMPLETED".equals(key) && !hasBookingEvent(t.getId(), "READY")) {
+            emitOrUpdateBookingEvent(t.getId(), "READY", defaultProgressLabel("READY"), "SHOP");
+            advanceTicketStatusForWorkCode(t, "READY");
+        }
+        // Invoice Generated → Out for Delivery, automatically and once.
+        if ("INVOICE_GENERATED".equals(key) && !hasBookingEvent(t.getId(), "DELIVERED_PROCESSING")) {
+            emitOrUpdateBookingEvent(t.getId(), "DELIVERED_PROCESSING", defaultProgressLabel("DELIVERED_PROCESSING"), "SHOP");
+            advanceTicketStatusForWorkCode(t, "DELIVERED_PROCESSING");
+        }
     }
 
     // Only advance forward through the lifecycle — never demote a DELIVERED
