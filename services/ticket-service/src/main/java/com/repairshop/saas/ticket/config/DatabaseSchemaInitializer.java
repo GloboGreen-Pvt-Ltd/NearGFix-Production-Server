@@ -39,7 +39,19 @@ public class DatabaseSchemaInitializer {
                     {"handed_over_at", "TIMESTAMPTZ"}, {"handover_json", "TEXT"}, {"inventory_item_id", "UUID"},
             };
             for (String[] c : sell) addColumnIfMissing("sell_orders", c[0], c[1]);
+            // Repair return delivery (RepairDeliveryController) — same as migration 116.
+            createRepairDeliveryTables();
         };
+    }
+
+    private void createRepairDeliveryTables() {
+        try {
+            String sql = new String(new org.springframework.core.io.ClassPathResource("db/repair_deliveries.sql").getInputStream().readAllBytes(),
+                    java.nio.charset.StandardCharsets.UTF_8);
+            jdbc.execute(sql.replace("BEGIN;", "").replace("COMMIT;", ""));
+        } catch (Exception e) {
+            log.warn("Could not ensure repair delivery tables: {}", e.getMessage());
+        }
     }
 
     private void addColumnIfMissing(String tableName, String columnName, String typeSql) {
