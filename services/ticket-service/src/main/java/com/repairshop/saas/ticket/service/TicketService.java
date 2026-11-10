@@ -1400,7 +1400,7 @@ public class TicketService {
         if (currentIdx >= 0 && targetIdx >= 0 && targetIdx < currentIdx) return;
         t.setStatus(target);
         ticketRepository.save(t);
-        customerOrderMirrorService.mirrorOnUpsert(t);
+        customerOrderMirrorService.mirrorOnUpsertInline(t); // same tx: REQUIRES_NEW here waited on this tx's row locks, 2 connections per request
     }
 
     // Steps that mean the invoice has already gone out with the device. Once one
@@ -1455,7 +1455,7 @@ public class TicketService {
         if (invoiceKeys.contains(current)) {
             t.setStatus(restoredIdx >= 0 ? LIFECYCLE_ORDER.get(restoredIdx) : "READY");
             ticketRepository.save(t);
-            customerOrderMirrorService.mirrorOnUpsert(t);
+            customerOrderMirrorService.mirrorOnUpsertInline(t);
         }
     }
 
