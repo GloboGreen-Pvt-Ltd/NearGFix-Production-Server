@@ -481,6 +481,30 @@ public class TicketService {
         java.util.Set<String> keys = new java.util.HashSet<>();
         for (java.util.Map<String, Object> it : items) keys.add(priceItemIdentity(it));
 
+        // Original items the revision drops (removed in the app). The snapshot
+        // taken by openPartnerRevision restores them on rejection.
+        java.util.Set<String> removeKeys = new java.util.HashSet<>();
+        if (req.getRemovedItemIds() != null) {
+            for (String r : req.getRemovedItemIds()) {
+                if (r != null && !r.isBlank()) removeKeys.add(r.trim().toLowerCase());
+            }
+        }
+        java.util.List<java.util.Map<String, Object>> removed = new ArrayList<>();
+        BigDecimal removedAmount = BigDecimal.ZERO;
+        if (!removeKeys.isEmpty()) {
+            java.util.Iterator<java.util.Map<String, Object>> it = items.iterator();
+            while (it.hasNext()) {
+                java.util.Map<String, Object> m = it.next();
+                String k = priceItemIdentity(m);
+                if (!removeKeys.contains(k)) continue;
+                it.remove();
+                keys.remove(k);
+                removed.add(m);
+                try { removedAmount = removedAmount.add(new BigDecimal(String.valueOf(m.getOrDefault("amount", "0")))); }
+                catch (NumberFormatException ignored) { /* non-numeric amount counts as 0 */ }
+            }
+        }
+
         java.util.List<java.util.Map<String, Object>> added = new ArrayList<>();
         BigDecimal extra = BigDecimal.ZERO;
         for (com.repairshop.saas.ticket.dto.ReEstimateRequest.Item in : req.getItems() == null ? java.util.List.<com.repairshop.saas.ticket.dto.ReEstimateRequest.Item>of() : req.getItems()) {
@@ -507,7 +531,7 @@ public class TicketService {
                     try { return new BigDecimal(String.valueOf(m.getOrDefault("amount", "0"))); }
                     catch (NumberFormatException e) { return BigDecimal.ZERO; }
                 }).reduce(BigDecimal.ZERO, BigDecimal::add);
-        BigDecimal newTotal = oldTotal.add(extra);
+        BigDecimal newTotal = oldTotal.add(extra).subtract(removedAmount).max(BigDecimal.ZERO);
         items.addAll(added);
         try {
             ticket.setPriceItemsJson(PRICE_ITEMS_MAPPER.writeValueAsString(items));
@@ -516,8 +540,15 @@ public class TicketService {
         }
         ticket.setEstimatedPrice(newTotal);
         String addedLabels = added.stream().map(m -> String.valueOf(m.get("label"))).collect(java.util.stream.Collectors.joining(", "));
-        String summary = ticket.getRepairServicesSummary();
-        ticket.setRepairServicesSummary(summary == null || summary.isBlank() ? addedLabels : summary + ", " + addedLabels);
+        String removedLabels = removed.stream().map(m -> String.valueOf(m.get("label"))).collect(java.util.stream.Collectors.joining(", "));
+        if (removed.isEmpty()) {
+            String summary = ticket.getRepairServicesSummary();
+            ticket.setRepairServicesSummary(summary == null || summary.isBlank() ? addedLabels : summary + ", " + addedLabels);
+        } else {
+            // Rebuild from the revised items so a dropped issue leaves the summary too.
+            ticket.setRepairServicesSummary(items.stream().map(m -> String.valueOf(m.get("label")))
+                    .collect(java.util.stream.Collectors.joining(", ")));
+        }
 
         // Keep the first delivery promise; the proposed one becomes the estimate.
         Instant oldDelivery = ticket.getEstimatedDeliveryAt();
@@ -537,7 +568,9 @@ public class TicketService {
         String note = "Re-estimated: ₹" + oldTotal.stripTrailingZeros().toPlainString()
                 + " + ₹" + extra.stripTrailingZeros().toPlainString()
                 + " = ₹" + newTotal.stripTrailingZeros().toPlainString()
-                + " · " + addedLabels + " · Reason: " + reason
+                + " · " + addedLabels
+                + (removed.isEmpty() ? "" : " · Removed: " + removedLabels + " (−₹" + removedAmount.stripTrailingZeros().toPlainString() + ")")
+                + " · Reason: " + reason
                 + (approvedNow ? " · Approved by customer" : " · Awaiting customer approval");
         String images = req.getImagesJson() == null || req.getImagesJson().isBlank() ? null : req.getImagesJson();
         emitOrUpdateBookingEvent(ticket.getId(), KEY_RE_ESTIMATED, note, "SHOP", null, images);
@@ -574,7 +607,11 @@ public class TicketService {
     private static String priceItemIdentity(java.util.Map<String, Object> m) {
         for (String k : new String[] { "id", "serviceId", "code", "serviceCode", "label", "serviceName" }) {
             Object v = m.get(k);
-            if (v != null && !String.valueOf(v).isBlank() && !"OTHER".equalsIgnoreCase(String.valueOf(v))) {
+            // OTHER / SERVICE_CHARGE are shared codes, not identities: every
+            // "Service Charge – <issue>" line has code SERVICE_CHARGE, so keying
+            // on it made a 2nd charge line look "already in the estimate".
+            if (v != null && !String.valueOf(v).isBlank() && !"OTHER".equalsIgnoreCase(String.valueOf(v))
+                    && !"SERVICE_CHARGE".equalsIgnoreCase(String.valueOf(v))) {
                 return String.valueOf(v).trim().toLowerCase();
             }
         }
