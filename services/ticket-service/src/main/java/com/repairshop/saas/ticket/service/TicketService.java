@@ -522,7 +522,7 @@ public class TicketService {
             added.add(row);
             extra = extra.add(in.getAmount());
         }
-        if (added.isEmpty()) {
+        if (added.isEmpty() && removed.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "These issues are already in the estimate");
         }
 
