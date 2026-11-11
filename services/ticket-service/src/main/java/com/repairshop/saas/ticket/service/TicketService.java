@@ -417,6 +417,7 @@ public class TicketService {
         // decided, so an Edit that touched the device, services or amount walked
         // an IN_REPAIR / APPROVED booking back to QUOTED ("Re-Estimated").
         if (isReEstimate(reEstimateFlag, priceItemsChanged || estimateChanged)) {
+            refuseReEstimateAfterReturn(ticket.getId());
             emitOrUpdateBookingEvent(ticket.getId(),
                     "RE_ESTIMATED_CONFIRMED",
                     NOTE_RE_ESTIMATED,
@@ -470,6 +471,7 @@ public class TicketService {
         if (hasCurrentInvoice(ticket.getId())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Invoice already generated — delete the invoice before re-estimating");
         }
+        refuseReEstimateAfterReturn(ticket.getId());
         String reason = req == null || req.getReason() == null ? "" : req.getReason().trim();
         if (reason.length() < 3) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Add the reason for the extra work");
@@ -1222,6 +1224,7 @@ public class TicketService {
     // SHOP_BOOKING_STATUS_OPTIONS.
     private static final String KEY_ISSUE_VERIFIED = "TECHNICIAN_COMPLIANCE_ISSUE_VERIFIED_UPDATED";
     private static final String KEY_RE_ESTIMATED = "RE_ESTIMATED_CONFIRMED";
+    static final String RETURNED_UNREPAIRED_NOTE = "Returned to Customer (Unrepaired)";
 
     // Notes read on the Service History rail under each step's label. The
     // renderer hides a note identical to the label, so these deliberately say
@@ -1253,6 +1256,30 @@ public class TicketService {
                 actor, null, null, java.time.Instant.now());
         // An approval also settles a re-estimate awaiting it (approved + back to repair).
         reEstimateWorkflow.onCustomerApproval(ticket, actor);
+    }
+
+    /** Steps that explicitly put a booking back on the repair path. */
+    private static final Set<String> REOPEN_KEYS = Set.of("REPAIR_WORK_RESUMED", "IN_REPAIR", "RE_SERVICE");
+
+    /** {@code marker} is in the current cycle and no reopen step came after it. */
+    boolean openSince(UUID ticketId, String marker) {
+        List<PlatformRepairBookingEvent> ev = platformRepairBookingRepository.findByTicketId(ticketId)
+                .map(b -> platformRepairBookingEventRepository.findCurrentCycle(b.getId()))
+                .orElse(List.of());
+        boolean open = false;
+        for (PlatformRepairBookingEvent e : ev) {
+            String k = e.getStatus() == null ? "" : e.getStatus().toUpperCase();
+            if (marker.equals(k)) open = true;
+            else if (REOPEN_KEYS.contains(k)) open = false;
+        }
+        return open;
+    }
+
+    private void refuseReEstimateAfterReturn(UUID ticketId) {
+        if (openSince(ticketId, "RETURN_DELIVERY")) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "The device is being returned unrepaired — resume the repair before re-estimating.");
+        }
     }
 
     private boolean hasBookingEvent(UUID ticketId, String statusKey) {
@@ -1394,6 +1421,11 @@ public class TicketService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "Enter the customer's reason for rejecting the service.");
         }
+        // "Repair not completed" stands until the repair is resumed (Resume / In Repair).
+        if ("REPAIR_COMPLETED".equals(key) && openSince(t.getId(), "REPAIR_NOT_COMPLETED")) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "The repair was marked not completed — resume the repair first.");
+        }
         // Repair Completed / QC / Ready / invoice wait for an open re-estimate (409 REESTIMATE_PENDING);
         // Customer Rejected / Cancelled / Return Delivery close it instead.
         reEstimateWorkflow.onProgressStep(t, key);
@@ -1420,6 +1452,12 @@ public class TicketService {
         // slide (other app, double tap, retry) must not overwrite who/when.
         if ("QUALITY_CHECK_COMPLETED".equals(key) && hasBookingEvent(t.getId(), key)) return;
         String text = note != null && !note.isBlank() ? note.trim() : defaultProgressLabel(key);
+        // Handing back a device that went down Return Delivery is a return, not a
+        // repaired delivery: keep the DELIVERED key (apps, lifecycle) but say so.
+        if ("DELIVERED".equals(key) && text.equals(defaultProgressLabel("DELIVERED"))
+                && openSince(t.getId(), "RETURN_DELIVERY")) {
+            text = RETURNED_UNREPAIRED_NOTE;
+        }
         emitOrUpdateBookingEvent(t.getId(), key, text, a);
         // The BookingsHistory list reads ticket.status directly, so a work-status
         // event alone (Spare Parts Waiting, Repair Completed, Delivered to Customer,

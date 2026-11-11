@@ -484,4 +484,31 @@ class ReEstimateWorkflowServiceTest {
     private Instant eventAt(String key) {
         return events.stream().filter(e -> key.equals(e.getStatus())).findFirst().orElseThrow().getCreatedAt();
     }
+    @Test
+    void repairCompletedRefusedAfterNotCompletedUntilResumed() {
+        ticketService.emitProgressStepEvent(shopId, ticketId, "REPAIR_NOT_COMPLETED", null, "TECHNICIAN");
+        assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                () -> ticketService.emitProgressStepEvent(shopId, ticketId, "REPAIR_COMPLETED", null, "TECHNICIAN"));
+        assertFalse(eventKeys().contains("REPAIR_COMPLETED"));
+        ticketService.emitProgressStepEvent(shopId, ticketId, "REPAIR_WORK_RESUMED", null, "TECHNICIAN");
+        ticketService.emitProgressStepEvent(shopId, ticketId, "REPAIR_COMPLETED", null, "TECHNICIAN");
+        assertTrue(eventKeys().contains("REPAIR_COMPLETED"));
+    }
+
+    @Test
+    void deliveredAfterReturnIsRecordedAsUnrepairedReturn() {
+        ticketService.emitProgressStepEvent(shopId, ticketId, "RETURN_DELIVERY", null, "OWNER");
+        ticketService.emitProgressStepEvent(shopId, ticketId, "DELIVERED", null, "OWNER");
+        PlatformRepairBookingEvent d = events.stream().filter(e -> "DELIVERED".equals(e.getStatus())).findFirst().orElseThrow();
+        assertEquals(TicketService.RETURNED_UNREPAIRED_NOTE, d.getNote());
+    }
+
+    @Test
+    void reEstimateRefusedWhileDeviceIsBeingReturned() {
+        ticketService.emitProgressStepEvent(shopId, ticketId, "RETURN_DELIVERY", null, "OWNER");
+        org.springframework.web.server.ResponseStatusException ex = assertThrows(
+                org.springframework.web.server.ResponseStatusException.class,
+                () -> ticketService.reEstimate(shopId, ticketId, partnerRevision(null, null), ownerUserId));
+        assertEquals(409, ex.getStatusCode().value());
+    }
 }
