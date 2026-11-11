@@ -126,7 +126,7 @@ public class TicketController {
         }
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
-        return ticketService.listByShop(shopId, status, q, pageable);
+        return reEstimateWorkflow.decorateOpenReEstimates(ticketService.listByShop(shopId, status, q, pageable));
     }
 
     @PostMapping
