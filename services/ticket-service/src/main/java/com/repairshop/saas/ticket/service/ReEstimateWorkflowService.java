@@ -418,7 +418,7 @@ public class ReEstimateWorkflowService {
                 // The revised charges were never agreed — the booking leaves with the original estimate.
                 restoreOriginal(t, r);
                 Ticket saved = ticketRepository.save(t);
-                customerOrderMirrorService.mirrorOnUpsert(saved != null ? saved : t);
+                customerOrderMirrorService.mirrorOnUpsertInline(saved != null ? saved : t); // inline: REQUIRES_NEW self-deadlocks inside the caller tx (cf. #49)
             } else {
                 appendEventNote(t.getId(), KEY_REQUESTED, " · " + reason);
             }
@@ -529,7 +529,7 @@ public class ReEstimateWorkflowService {
         if (approved) moveForward(t, repairStarted ? "IN_REPAIR" : "APPROVED");
         else t.setStatus("CANCELLED");
         Ticket saved = ticketRepository.save(t);
-        customerOrderMirrorService.mirrorOnUpsert(saved != null ? saved : t);
+        customerOrderMirrorService.mirrorOnUpsertInline(saved != null ? saved : t); // inline: REQUIRES_NEW self-deadlocks inside the caller tx (cf. #49)
 
         if (approved && writeCustomerApproved) {
             emitOrUpdate(t.getId(), "CUSTOMER_APPROVED", TicketService.NOTE_APPROVED_RE_ESTIMATE, "SHOP", null, at);
