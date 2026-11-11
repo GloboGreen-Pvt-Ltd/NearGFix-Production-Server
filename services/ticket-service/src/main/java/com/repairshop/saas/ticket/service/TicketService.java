@@ -935,7 +935,9 @@ public class TicketService {
                 emitBookingEvent(ticket.getId(), "ASSIGNED_TO_TECHNICIAN",
                         "Assigned to " + techName, "SHOP");
             } else {
-                emitOrUpdateBookingEvent(ticket.getId(), "REASSIGNED_TO_TECHNICIAN",
+                // One row per re-assignment (history with real timestamps),
+                // not one row overwritten each time.
+                appendBookingEvent(ticket.getId(), "REASSIGNED_TO_TECHNICIAN",
                         "Re-assigned to " + techName, "SHOP");
             }
             // The patch above cleared technician_accepted_at, so the booking is
@@ -1154,8 +1156,16 @@ public class TicketService {
             // proven. emitBookingEvent dedupes so a stale auto-fire from a
             // pre-fix run won't double-write.
             String techName = me.getName() != null ? me.getName() : "Technician";
-            emitBookingEvent(ticket.getId(), "TECHNICIAN_ACCEPTED_SERVICE",
-                    techName + " accepted the service", "TECHNICIAN");
+            // After a re-assignment the earlier technician's acceptance row
+            // already exists (dedupe would drop this one), so re-stamp it with
+            // the new technician and the real acceptance time.
+            if (hasCurrentCycleEvent(ticket.getId(), "TECHNICIAN_ACCEPTED_SERVICE")) {
+                emitOrUpdateBookingEvent(ticket.getId(), "TECHNICIAN_ACCEPTED_SERVICE",
+                        techName + " accepted the service", "TECHNICIAN");
+            } else {
+                emitBookingEvent(ticket.getId(), "TECHNICIAN_ACCEPTED_SERVICE",
+                        techName + " accepted the service", "TECHNICIAN");
+            }
             emitBookingEvent(ticket.getId(), "TECHNICIAN_WORK_STARTED",
                     "Technician Work Started", "TECHNICIAN");
         }
@@ -1222,6 +1232,28 @@ public class TicketService {
     // same status key already exists so re-saves don't double-emit.
     private void emitBookingEvent(UUID ticketId, String statusKey, String note, String actor) {
         emitBookingEvent(ticketId, statusKey, note, actor, actor);
+    }
+
+    private boolean hasCurrentCycleEvent(UUID ticketId, String statusKey) {
+        return platformRepairBookingRepository.findByTicketId(ticketId)
+                .map(b -> platformRepairBookingEventRepository.findCurrentCycle(b.getId()).stream()
+                        .anyMatch(e -> statusKey.equalsIgnoreCase(e.getStatus())))
+                .orElse(false);
+    }
+
+    /** Always inserts a new event row (no dedupe) — for history rows such as
+     *  each technician re-assignment. Same notifications as emitBookingEvent. */
+    private void appendBookingEvent(UUID ticketId, String statusKey, String note, String actor) {
+        platformRepairBookingRepository.findByTicketId(ticketId).ifPresent(booking -> {
+            platformRepairBookingEventRepository.save(PlatformRepairBookingEvent.builder()
+                    .bookingId(booking.getId())
+                    .status(statusKey)
+                    .note(note)
+                    .actor(actor)
+                    .build());
+            customerOrderMirrorService.emitCustomerNotificationForStatus(booking.getId(), statusKey);
+            customerOrderMirrorService.emitShopNotificationForStatus(booking.getId(), statusKey, actor);
+        });
     }
 
     // `actor` is what the timeline row records (SHOP / TECHNICIAN); `notifyActor`
