@@ -331,7 +331,7 @@ class ReEstimateWorkflowServiceTest {
         assertFalse(eventKeys().contains("REPAIR_WORK_RESUMED"));
         assertFalse(eventKeys().contains("CUSTOMER_REJECTED"));
         assertFalse(eventKeys().contains("RE_ESTIMATE_APPROVED"));
-        verify(mirror, atLeastOnce()).mirrorOnUpsert(ticket);
+        verify(mirror, atLeastOnce()).mirrorOnUpsertInline(ticket);
     }
 
     @Test
