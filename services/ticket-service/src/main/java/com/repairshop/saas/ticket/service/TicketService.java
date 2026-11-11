@@ -1723,11 +1723,8 @@ public class TicketService {
                                           String audioUrl, String imagesJson, java.time.Instant at) {
         java.time.Instant stamp = at != null ? at : java.time.Instant.now();
         platformRepairBookingRepository.findByTicketId(ticketId).ifPresent(booking -> {
-            var existing = platformRepairBookingEventRepository
-                    .findCurrentCycle(booking.getId())
-                    .stream()
-                    .filter(e -> statusKey.equalsIgnoreCase(e.getStatus()))
-                    .findFirst();
+            var existing = ReEstimateWorkflowService.sameRevisionRow(
+                    platformRepairBookingEventRepository.findCurrentCycle(booking.getId()), statusKey);
             if (existing.isPresent()) {
                 PlatformRepairBookingEvent e = existing.get();
                 e.setNote(note);
