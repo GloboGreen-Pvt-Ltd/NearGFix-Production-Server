@@ -34,6 +34,9 @@ public class ReEstimateRequest {
     @Schema(description = "Technician re-estimate request this answers (REQUESTED revision id); omit when re-estimating on the shop's own")
     private java.util.UUID requestId;
 
+    @Schema(description = "Identities (id / code / label) of ORIGINAL line items the revision drops; restored if the customer rejects")
+    private List<String> removedItemIds;
+
     @Data
     public static class Item {
         @Schema(description = "Catalogue service id (null for a custom issue)")
