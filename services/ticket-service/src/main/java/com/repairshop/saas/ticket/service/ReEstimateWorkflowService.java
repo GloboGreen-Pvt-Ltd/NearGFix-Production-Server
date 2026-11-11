@@ -694,10 +694,8 @@ public class ReEstimateWorkflowService {
     void emitOrUpdate(UUID ticketId, String key, String note, String actor, String imagesJson, Instant at) {
         Instant stamp = at != null ? at : Instant.now();
         platformRepairBookingRepository.findByTicketId(ticketId).ifPresent(booking -> {
-            Optional<PlatformRepairBookingEvent> existing = platformRepairBookingEventRepository
-                    .findCurrentCycle(booking.getId()).stream()
-                    .filter(e -> key.equalsIgnoreCase(e.getStatus()))
-                    .findFirst();
+            Optional<PlatformRepairBookingEvent> existing = sameRevisionRow(
+                    platformRepairBookingEventRepository.findCurrentCycle(booking.getId()), key);
             if (existing.isPresent()) {
                 PlatformRepairBookingEvent e = existing.get();
                 e.setNote(note);
@@ -721,11 +719,42 @@ public class ReEstimateWorkflowService {
         });
     }
 
+    // Re-estimate rows are kept per revision: Revision 2 adds new rows instead
+    // of overwriting Revision 1's request / re-estimate / verdict / resume.
+    static final java.util.Set<String> REVISION_KEYS = java.util.Set.of(
+            KEY_REQUESTED, "RE_ESTIMATED_CONFIRMED", KEY_APPROVED, "RE_ESTIMATE_REJECTED", KEY_RESUMED);
+    private static final java.util.Set<String> REVISION_VERDICTS = java.util.Set.of(KEY_APPROVED, "RE_ESTIMATE_REJECTED");
+
+    static Optional<PlatformRepairBookingEvent> latestRow(List<PlatformRepairBookingEvent> cycle, String key) {
+        return cycle.stream().filter(e -> key.equalsIgnoreCase(e.getStatus()))
+                .max(java.util.Comparator.comparing(e -> e.getCreatedAt() == null ? Instant.EPOCH : e.getCreatedAt()));
+    }
+
+    /**
+     * The row of {@code key} an emit may refresh in place, or empty to insert a
+     * new one. Non-revision keys keep one row per cycle. A request / re-estimate
+     * row is closed once a verdict came after it; a verdict / resume row once a
+     * newer re-estimate exists — those start the next revision's rows.
+     */
+    static Optional<PlatformRepairBookingEvent> sameRevisionRow(List<PlatformRepairBookingEvent> cycle, String key) {
+        String k = key == null ? "" : key.toUpperCase();
+        if (!REVISION_KEYS.contains(k)) {
+            return cycle.stream().filter(e -> k.equalsIgnoreCase(e.getStatus())).findFirst();
+        }
+        Optional<PlatformRepairBookingEvent> latest = latestRow(cycle, k);
+        if (latest.isEmpty()) return latest;
+        Instant t = latest.get().getCreatedAt() == null ? Instant.EPOCH : latest.get().getCreatedAt();
+        boolean closed = REVISION_VERDICTS.contains(k) || KEY_RESUMED.equals(k)
+                ? cycle.stream().anyMatch(e -> "RE_ESTIMATED_CONFIRMED".equalsIgnoreCase(e.getStatus())
+                        && e.getCreatedAt() != null && e.getCreatedAt().isAfter(t))
+                : cycle.stream().anyMatch(e -> e.getStatus() != null && REVISION_VERDICTS.contains(e.getStatus().toUpperCase())
+                        && e.getCreatedAt() != null && !e.getCreatedAt().isBefore(t));
+        return closed ? Optional.empty() : latest;
+    }
+
     private void appendEventNote(UUID ticketId, String key, String suffix) {
         platformRepairBookingRepository.findByTicketId(ticketId).ifPresent(booking ->
-                platformRepairBookingEventRepository.findCurrentCycle(booking.getId()).stream()
-                        .filter(e -> key.equalsIgnoreCase(e.getStatus()))
-                        .findFirst()
+                latestRow(platformRepairBookingEventRepository.findCurrentCycle(booking.getId()), key)
                         .ifPresent(e -> {
                             e.setNote((e.getNote() == null ? "" : e.getNote()) + suffix);
                             platformRepairBookingEventRepository.save(e);
