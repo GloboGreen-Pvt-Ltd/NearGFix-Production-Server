@@ -550,7 +550,11 @@ public class CustomerOrderMirrorService {
             // are themselves valid step keys). Other transitions are surfaced
             // by their dedicated emits elsewhere.
             String stepKey = mapMacroStatusToStepKey(bookingStatus);
-            if (stepKey != null) {
+            // The step's own emit (progress step / auto READY / DELIVERED) usually
+            // wrote this row already — a second blank SHOP row duplicated it.
+            boolean already = stepKey != null && bookingEventRepo.findCurrentCycle(bookingId).stream()
+                    .anyMatch(e -> stepKey.equalsIgnoreCase(e.getStatus()));
+            if (stepKey != null && !already) {
                 bookingEventRepo.save(PlatformRepairBookingEvent.builder()
                         .bookingId(bookingId).status(stepKey).actor("SHOP").build());
                 emitNotificationsForStatus(bookingId, stepKey, actor);
