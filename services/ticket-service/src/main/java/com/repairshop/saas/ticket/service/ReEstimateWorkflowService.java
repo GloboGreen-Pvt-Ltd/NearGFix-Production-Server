@@ -25,8 +25,11 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import org.springframework.data.domain.Page;
+
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -469,6 +472,26 @@ public class ReEstimateWorkflowService {
                 .map(this::toDto)
                 .orElse(null));
         return resp;
+    }
+
+    /**
+     * Jobs list: sets activeReEstimate on every row of a page with ONE query,
+     * so the list shows the same open request Booking Details does.
+     */
+    @Transactional(readOnly = true)
+    public Page<TicketResponse> decorateOpenReEstimates(Page<TicketResponse> page) {
+        if (page == null || page.isEmpty()) return page;
+        List<UUID> ids = page.getContent().stream().map(TicketResponse::getId).filter(Objects::nonNull).toList();
+        if (ids.isEmpty()) return page;
+        Map<UUID, TicketReEstimateRevision> open = new HashMap<>();
+        for (TicketReEstimateRevision r : revisionRepository.findByTicketIdInAndStatusIn(ids, OPEN)) {
+            open.merge(r.getTicketId(), r, (a, b) -> Objects.requireNonNullElse(a.getRevisionNo(), 0) >= Objects.requireNonNullElse(b.getRevisionNo(), 0) ? a : b);
+        }
+        page.getContent().forEach(resp -> {
+            TicketReEstimateRevision r = open.get(resp.getId());
+            if (r != null) resp.setActiveReEstimate(toDto(r));
+        });
+        return page;
     }
 
     // ════════════════════════════════════════════════════════════════════

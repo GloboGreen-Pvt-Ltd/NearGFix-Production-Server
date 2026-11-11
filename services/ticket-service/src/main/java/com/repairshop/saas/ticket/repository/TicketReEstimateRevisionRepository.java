@@ -21,6 +21,9 @@ public interface TicketReEstimateRevisionRepository extends JpaRepository<Ticket
 
     List<TicketReEstimateRevision> findByTicketIdAndStatusIn(UUID ticketId, Collection<String> statuses);
 
+    /** Open revisions for a page of tickets in one query (Jobs list). */
+    List<TicketReEstimateRevision> findByTicketIdInAndStatusIn(Collection<UUID> ticketIds, Collection<String> statuses);
+
     /** Open rows (REQUESTED / AWAITING_APPROVAL), row-locked for the rest of the transaction. */
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT r FROM TicketReEstimateRevision r WHERE r.ticketId = :ticketId AND r.status IN :statuses")
