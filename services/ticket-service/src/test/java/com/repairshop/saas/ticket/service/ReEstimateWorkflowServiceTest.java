@@ -159,6 +159,33 @@ class ReEstimateWorkflowServiceTest {
                 .status(key).actor("TECHNICIAN").createdAt(at).build());
     }
 
+    private java.util.List<String> eventOrder() {
+        return events.stream().map(PlatformRepairBookingEvent::getStatus).collect(Collectors.toList());
+    }
+
+    @Test
+    void unableToRepairAutoReturnsAndGoesOutForDelivery() {
+        ticketService.emitProgressStepEvent(shopId, ticketId, "REPAIR_NOT_COMPLETED", "Board damaged", "TECHNICIAN");
+        java.util.List<String> keys = eventOrder();
+        assertTrue(keys.indexOf("REPAIR_NOT_COMPLETED") < keys.indexOf("RETURN_DELIVERY"));
+        assertTrue(keys.indexOf("RETURN_DELIVERY") < keys.indexOf("DELIVERED_PROCESSING"));
+        assertFalse(keys.contains("DELIVERED"));
+    }
+
+    @Test
+    void shopReturnAutoAdvancesAndBlocksDuplicatesAndRepairedPath() {
+        ticketService.emitProgressStepEvent(shopId, ticketId, "CUSTOMER_REJECTED", "Customer wants it back", "OWNER");
+        assertTrue(eventKeys().contains("RETURN_DELIVERY"));
+        assertTrue(eventKeys().contains("DELIVERED_PROCESSING"));
+        assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                () -> ticketService.emitProgressStepEvent(shopId, ticketId, "CUSTOMER_REJECTED", "again", "OWNER"));
+        assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                () -> ticketService.emitProgressStepEvent(shopId, ticketId, "REPAIR_NOT_COMPLETED", null, "TECHNICIAN"));
+        assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                () -> ticketService.emitProgressStepEvent(shopId, ticketId, "QUALITY_CHECK_COMPLETED", null, "TECHNICIAN"));
+        assertEquals(1, eventOrder().stream().filter("RETURN_DELIVERY"::equals).count());
+    }
+
     private Set<String> eventKeys() {
         return events.stream().map(PlatformRepairBookingEvent::getStatus).collect(Collectors.toSet());
     }
