@@ -18,6 +18,12 @@ public class LoginResponse {
     @Schema(description = "JWT access token")
     private String accessToken;
 
+    @Schema(description = "Opaque refresh token for POST /auth/refresh (rotated on every use)")
+    private String refreshToken;
+
+    @Schema(description = "Refresh token expiry in seconds")
+    private Long refreshExpiresIn;
+
     @Schema(description = "Token type", example = "Bearer")
     private String tokenType;
 

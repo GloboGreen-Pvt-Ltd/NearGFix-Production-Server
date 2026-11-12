@@ -27,6 +27,7 @@ import com.repairshop.saas.auth.repository.ShopRepository;
 import com.repairshop.saas.auth.repository.SubscriptionRepository;
 import com.repairshop.saas.auth.repository.UserRepository;
 import com.repairshop.saas.auth.security.JwtService;
+import com.repairshop.saas.auth.security.RefreshTokenService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -66,6 +67,7 @@ public class AuthService {
     private final JwtService jwtService;
     private final PasswordEncoder passwordEncoder;
     private final OtpStore otpStore;
+    private final RefreshTokenService refreshTokenService;
     private final EmailService emailService;
     // ticket-service owns the `technicians` table but shares this Postgres DB.
     // We JDBC-link a technician's user_id when provisioning its login so the
@@ -85,7 +87,7 @@ public class AuthService {
      *
      * Default OTP for both flows is 123456 (see migration 54 and User.otp_code default).
      */
-    @Transactional(readOnly = true)
+    @Transactional
     public LoginResponse login(LoginRequest request) {
         boolean usingOtp = request.getOtp() != null && !request.getOtp().isBlank();
         boolean usingPwd = request.getPassword() != null && !request.getPassword().isBlank();
@@ -147,7 +149,7 @@ public class AuthService {
      * loginScope=SHOP claim — switch-shop will reject it. The token's subject
      * is the shop's owner user, so downstream services still see a userId.
      */
-    @Transactional(readOnly = true)
+    @Transactional
     public LoginResponse shopLogin(ShopLoginRequest request) {
         boolean usingOtp = request.getOtp() != null && !request.getOtp().isBlank();
         boolean usingPwd = request.getPassword() != null && !request.getPassword().isBlank();
@@ -183,8 +185,14 @@ public class AuthService {
      * given shopId in the claim so downstream services scope queries to it.
      * Rejects shopIds the owner doesn't actually own.
      */
-    @Transactional(readOnly = true)
+    @Transactional
     public LoginResponse switchShop(UUID userId, UUID shopId) {
+        return switchShop(userId, shopId, null);
+    }
+
+    /** As above; the pre-switch refresh session (if sent) is revoked — the new one replaces it. */
+    @Transactional
+    public LoginResponse switchShop(UUID userId, UUID shopId, String previousRefreshToken) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new UnauthorizedException("User not found"));
         if (!"SHOP_OWNER".equals(user.getRole()))
@@ -193,7 +201,35 @@ public class AuthService {
                 .orElseThrow(() -> new BadRequestException("Shop not found"));
         if (target.getOwnerUserId() == null || !target.getOwnerUserId().equals(userId))
             throw new UnauthorizedException("Shop not owned by this user");
+        refreshTokenService.revoke(previousRefreshToken);
         return buildLoginResponse(user, target.getId());
+    }
+
+    /**
+     * Exchange a refresh token for a new access + refresh token pair (rotation).
+     * Re-checks that the account (and, for shop-mobile sessions, the shop) is
+     * still active, so a deactivated user cannot keep refreshing.
+     */
+    @Transactional(noRollbackFor = UnauthorizedException.class)
+    public LoginResponse refresh(String refreshToken) {
+        RefreshTokenService.Grant g = refreshTokenService.consume(refreshToken);
+        User user = userRepository.findById(g.userId())
+                .orElseThrow(() -> new UnauthorizedException("User not found"));
+        if (!Boolean.TRUE.equals(user.getIsActive()))
+            throw new UnauthorizedException(INACTIVE_ACCOUNT_MESSAGE);
+        if ("SHOP".equals(g.loginScope())) {
+            Shop shop = g.shopId() == null ? null : shopRepository.findById(g.shopId()).orElse(null);
+            if (shop == null || !Boolean.TRUE.equals(shop.getIsActive())
+                    || shop.getOwnerUserId() == null || !shop.getOwnerUserId().equals(user.getId()))
+                throw new UnauthorizedException("Shop is disabled");
+            return buildShopScopedLoginResponse(user, shop, g.familyId());
+        }
+        return buildLoginResponse(user, g.shopId(), g.familyId());
+    }
+
+    /** Logout: revoke the refresh token's session family. */
+    public void logout(String refreshToken) {
+        refreshTokenService.revoke(refreshToken);
     }
 
     /**
@@ -202,6 +238,10 @@ public class AuthService {
      * shops array so the client knows there's nothing to switch to.
      */
     private LoginResponse buildShopScopedLoginResponse(User owner, Shop shop) {
+        return buildShopScopedLoginResponse(owner, shop, null);
+    }
+
+    private LoginResponse buildShopScopedLoginResponse(User owner, Shop shop, UUID refreshFamily) {
         String token = jwtService.generateToken(
                 owner.getId(),
                 shop.getId(),
@@ -219,6 +259,8 @@ public class AuthService {
                 .accessToken(token)
                 .tokenType("Bearer")
                 .expiresIn(jwtService.getExpiryMs() / 1000)
+                .refreshToken(refreshTokenService.issue(owner.getId(), shop.getId(), "SHOP", refreshFamily))
+                .refreshExpiresIn(refreshTokenService.getTtlMs() / 1000)
                 .userId(owner.getId().toString())
                 .shopId(shop.getId().toString())
                 .shopName(shop.getName())
@@ -238,6 +280,10 @@ public class AuthService {
      * fall back to the first owned shop (or user.shop / null per role).
      */
     private LoginResponse buildLoginResponse(User user, UUID preferredShopId) {
+        return buildLoginResponse(user, preferredShopId, null);
+    }
+
+    private LoginResponse buildLoginResponse(User user, UUID preferredShopId, UUID refreshFamily) {
         // Determine the active shop for JWT shopId claim.
         List<Shop> ownedShops = "SHOP_OWNER".equals(user.getRole())
                 ? shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(user.getId())
@@ -278,6 +324,8 @@ public class AuthService {
                 .accessToken(token)
                 .tokenType("Bearer")
                 .expiresIn(jwtService.getExpiryMs() / 1000)
+                .refreshToken(refreshTokenService.issue(user.getId(), shopId, "OWNER", refreshFamily))
+                .refreshExpiresIn(refreshTokenService.getTtlMs() / 1000)
                 .userId(user.getId().toString())
                 .shopId(shopId != null ? shopId.toString() : null)
                 .shopName(shopName)
@@ -756,6 +804,7 @@ public class AuthService {
             shop.setMobilePasswordHash(null);
         } else {
             shop.setMobilePasswordHash(passwordEncoder.encode(newPassword));
+            refreshTokenService.revokeShopScope(shop.getId());
         }
         shopRepository.save(shop);
         User owner = userRepository.findById(ownerId)
@@ -887,7 +936,10 @@ public class AuthService {
 
         if (notBlank(req.getName()))           u.setName(req.getName().trim());
         if (notBlank(req.getEmail()))          u.setEmail(req.getEmail().trim());
-        if (notBlank(req.getPassword()))       u.setPasswordHash(passwordEncoder.encode(req.getPassword()));
+        if (notBlank(req.getPassword())) {
+            u.setPasswordHash(passwordEncoder.encode(req.getPassword()));
+            refreshTokenService.revokeAllForUser(u.getId());
+        }
         if (req.getPhone() != null)            u.setPhone(req.getPhone());
         if (req.getSecondaryMobile() != null)  u.setSecondaryMobile(req.getSecondaryMobile());
         // Media URLs use notBlank, not a bare null check: a client that omits the
@@ -1091,6 +1143,7 @@ public class AuthService {
             throw new UnauthorizedException("Invalid or expired OTP.");
         user.setPasswordHash(passwordEncoder.encode(newPassword.trim()));
         userRepository.save(user);
+        refreshTokenService.revokeAllForUser(user.getId());   // end every other session
         return buildLoginResponse(user, null);
     }
 
@@ -1243,6 +1296,7 @@ public class AuthService {
         if (!Roles.isShopOwner(u.getRole()) && !Roles.isMarketPerson(u.getRole()))
             throw new BadRequestException("User is not a shop owner or market person");
         u.setIsActive(active);
+        if (!active) refreshTokenService.revokeAllForUser(u.getId());
         u = userRepository.save(u);
         return toOwnerView(u, shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(u.getId()));
     }
