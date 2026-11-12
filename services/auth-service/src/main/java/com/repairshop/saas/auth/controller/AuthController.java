@@ -55,6 +55,20 @@ public class AuthController {
         return authService.login(request);
     }
 
+    @PostMapping("/refresh")
+    @ResponseStatus(HttpStatus.OK)
+    @Operation(summary = "Refresh session", description = "Exchanges a refresh token for a new access token and a rotated refresh token")
+    public LoginResponse refresh(@RequestBody(required = false) Map<String, String> body) {
+        return authService.refresh(body == null ? null : body.get("refreshToken"));
+    }
+
+    @PostMapping("/logout")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    @Operation(summary = "Logout", description = "Revokes the refresh token's session")
+    public void logout(@RequestBody(required = false) Map<String, String> body) {
+        authService.logout(body == null ? null : body.get("refreshToken"));
+    }
+
     @GetMapping("/me")
     @ResponseStatus(HttpStatus.OK)
     @Operation(summary = "Current shop-owner profile",
@@ -105,7 +119,7 @@ public class AuthController {
         UUID shopId;
         try { shopId = UUID.fromString(shopIdStr); }
         catch (IllegalArgumentException e) { throw new UnauthorizedException("Invalid shopId"); }
-        return authService.switchShop(userId, shopId);
+        return authService.switchShop(userId, shopId, body.get("refreshToken"));
     }
 
     @PostMapping("/shop-login")

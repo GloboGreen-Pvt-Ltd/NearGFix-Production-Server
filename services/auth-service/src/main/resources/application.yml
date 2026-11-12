@@ -34,6 +34,7 @@ app:
   jwt:
     secret: ${JWT_SECRET:your-256-bit-secret-key-for-repair-shop-saas-jwt-signing}
     expiry-ms: ${JWT_EXPIRY_MS:31536000000}   # 365 days — stay logged in until explicit logout (app-lock guards access)
+    refresh-expiry-ms: ${JWT_REFRESH_EXPIRY_MS:7776000000}   # 90 days, rotated on every /auth/refresh
   resend:
     # Provide the key via the RESEND_API_KEY env var (do NOT hardcode it here —
     # this file is committed). Email OTP is disabled if unset.
