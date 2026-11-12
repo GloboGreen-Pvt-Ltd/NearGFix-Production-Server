@@ -1426,6 +1426,18 @@ public class TicketService {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "The repair was marked not completed — resume the repair first.");
         }
+        // A return already in progress: no second return start (duplicate), and no
+        // repaired-path step (conflicting status) until the repair is resumed.
+        if (openSince(t.getId(), "RETURN_DELIVERY")) {
+            if (RETURN_STARTS.contains(key)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "This booking is already being returned to the customer.");
+            }
+            if (REPAIRED_PATH_KEYS.contains(key)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "This booking is being returned unrepaired — resume the repair first.");
+            }
+        }
         // Repair Completed / QC / Ready / invoice wait for an open re-estimate (409 REESTIMATE_PENDING);
         // Customer Rejected / Cancelled / Return Delivery close it instead.
         reEstimateWorkflow.onProgressStep(t, key);
@@ -1480,7 +1492,27 @@ public class TicketService {
             emitOrUpdateBookingEvent(t.getId(), "DELIVERED_PROCESSING", defaultProgressLabel("DELIVERED_PROCESSING"), "SHOP");
             advanceTicketStatusForWorkCode(t, "DELIVERED_PROCESSING");
         }
+        // Return flows: technician "Unable to repair" (REPAIR_NOT_COMPLETED) or
+        // the shop's Cancel / Return / Close (CUSTOMER_REJECTED, reason required)
+        // → Return to Customer → Out for Delivery, automatically and once each.
+        // Delivered stays the shop's manual slide (physical handover).
+        if (RETURN_STARTS.contains(key)) {
+            if (!openSince(t.getId(), "RETURN_DELIVERY")) {
+                reEstimateWorkflow.onProgressStep(t, "RETURN_DELIVERY");
+                emitOrUpdateBookingEvent(t.getId(), "RETURN_DELIVERY", defaultProgressLabel("RETURN_DELIVERY"), "SHOP");
+                advanceTicketStatusForWorkCode(t, "RETURN_DELIVERY");
+            }
+            if (!hasBookingEvent(t.getId(), "DELIVERED_PROCESSING")) {
+                emitOrUpdateBookingEvent(t.getId(), "DELIVERED_PROCESSING", defaultProgressLabel("DELIVERED_PROCESSING"), "SHOP");
+                advanceTicketStatusForWorkCode(t, "DELIVERED_PROCESSING");
+            }
+        }
     }
+
+    // Ways onto the return branch (see emitProgressStepEvent).
+    private static final Set<String> RETURN_STARTS = Set.of("REPAIR_NOT_COMPLETED", "CUSTOMER_REJECTED");
+    // Repaired-path steps that conflict with an open return.
+    private static final Set<String> REPAIRED_PATH_KEYS = Set.of("REPAIR_COMPLETED", "QUALITY_CHECK_COMPLETED", "READY");
 
     // Only advance forward through the lifecycle — never demote a DELIVERED
     // ticket back to IN_REPAIR because an older code was re-submitted, and
