@@ -37,7 +37,12 @@ SERVER_MAJOR=$((SERVER_MAJOR / 10000))
 CLIENT_MAJOR=$(pg_dump --version | grep -oE '[0-9]+' | head -1)
 if [[ "$CLIENT_MAJOR" -lt "$SERVER_MAJOR" ]]; then
   echo "Upgrading PostgreSQL client $CLIENT_MAJOR -> $SERVER_MAJOR to match the server..."
-  sudo dnf install -y -q --allowerasing "postgresql${SERVER_MAJOR}" >/dev/null \
+  # postgresqlNN packages all own /usr/bin/pg_dump etc.: swap the old client out.
+  { if rpm -q "postgresql${CLIENT_MAJOR}" >/dev/null 2>&1; then
+      sudo dnf swap -y -q "postgresql${CLIENT_MAJOR}" "postgresql${SERVER_MAJOR}" >/dev/null
+    else
+      sudo dnf install -y -q "postgresql${SERVER_MAJOR}" >/dev/null
+    fi; } \
     || { echo "ERROR: postgresql${SERVER_MAJOR} client not installable; no backup possible, not migrating." >&2; exit 1; }
   hash -r
   CLIENT_MAJOR=$(pg_dump --version | grep -oE '[0-9]+' | head -1)
