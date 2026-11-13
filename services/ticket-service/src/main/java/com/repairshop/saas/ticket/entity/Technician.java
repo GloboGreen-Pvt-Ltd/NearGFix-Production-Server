@@ -42,6 +42,16 @@ public class Technician {
     @Column(name = "role_label", length = 100)
     private String roleLabel;
 
+    /** The shop owner's own row ("Owner as Technician"); hidden from employee lists. */
+    @Column(name = "is_owner", nullable = false)
+    @Builder.Default
+    private boolean isOwner = false;
+
+    /** Owner as Technician ON/OFF — only meaningful on the is_owner row. */
+    @Column(name = "owner_tech_enabled", nullable = false)
+    @Builder.Default
+    private boolean ownerTechEnabled = false;
+
     @Column(name = "is_available", nullable = false)
     private boolean isAvailable = true;
 

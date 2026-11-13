@@ -18,5 +18,8 @@ public interface TechnicianRepository extends JpaRepository<Technician, UUID> {
 
     Optional<Technician> findFirstByUserId(UUID userId);
 
+    @org.springframework.data.jpa.repository.Query("SELECT t FROM Technician t WHERE t.shopId = :shopId AND t.isOwner = true")
+    Optional<Technician> findOwnerRow(@org.springframework.data.repository.query.Param("shopId") UUID shopId);
+
     List<Technician> findByShopIdOrderByNameAsc(UUID shopId);
 }

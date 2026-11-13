@@ -260,6 +260,15 @@ public class TicketService {
                 .orElse(new PageImpl<>(Collections.emptyList(), pageable, 0));
     }
 
+    /** Shop-scoped variant: an owner working in several shops sees only this shop's technician row. */
+    @Transactional(readOnly = true)
+    public Page<TicketResponse> listByAssignedUser(UUID shopId, UUID userId, Pageable pageable) {
+        if (shopId == null) return listByAssignedUser(userId, pageable);
+        return technicianRepository.findByShopIdAndUserId(shopId, userId)
+                .map(tech -> toResponsePage(ticketRepository.findByAssignedTechnicianId(tech.getId(), pageable)))
+                .orElse(new PageImpl<>(Collections.emptyList(), pageable, 0));
+    }
+
     /**
      * Returns booking/ticket counts for the shop (for owner dashboard).
      * Keys: CREATED, IN_DIAGNOSIS, QUOTED, APPROVED, IN_REPAIR, READY,
@@ -811,7 +820,11 @@ public class TicketService {
     @Transactional
     public TicketResponse patch(UUID shopId, UUID id, Map<String, Object> body, String actor,
                                 UUID callerUserId) {
-        Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
+        boolean assigning = body.containsKey("assignedTechnicianId");
+        // Assignment changes take a row lock so two concurrent (re)assigns
+        // can't both pass the eligibility / expected-technician checks.
+        Ticket ticket = (assigning ? ticketRepository.lockByShopIdAndId(shopId, id)
+                        : ticketRepository.findByShopIdAndId(shopId, id))
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
 
         UUID technicianBeforePatch = ticket.getAssignedTechnicianId();
@@ -879,9 +892,20 @@ public class TicketService {
                     : ticket.getPaymentAmount();
             applyPayment(ticket, rawType, rawAmount);
         }
-        if (body.containsKey("assignedTechnicianId")) {
+        if (assigning) {
             Object raw = body.get("assignedTechnicianId");
+            // Optional optimistic check from the app: the technician it showed
+            // when the owner opened the picker. A stale screen gets a 409.
+            if (body.containsKey("expectedTechnicianId")) {
+                Object exp = body.get("expectedTechnicianId");
+                UUID expected = exp == null || String.valueOf(exp).isBlank() ? null : UUID.fromString(String.valueOf(exp));
+                if (!java.util.Objects.equals(expected, technicianBeforePatch)) {
+                    throw new ResponseStatusException(HttpStatus.CONFLICT,
+                            "This booking's technician was changed meanwhile - refresh and try again.");
+                }
+            }
             if (raw == null || String.valueOf(raw).isBlank()) {
+                if (technicianBeforePatch != null) assertAssignable(ticket);
                 ticket.setAssignedTechnicianId(null);
             } else {
                 UUID value = UUID.fromString(String.valueOf(raw));
@@ -889,6 +913,22 @@ public class TicketService {
                 Technician tech = technicianRepository.findByShopIdAndId(shopId, value)
                         .or(() -> technicianRepository.findByShopIdAndUserId(shopId, value))
                         .orElse(null);
+                if (tech == null && value.equals(callerUserId)) {
+                    // The owner assigning to themselves goes through the
+                    // Owner as Technician row, never an ad-hoc employee row.
+                    throw new ResponseStatusException(HttpStatus.CONFLICT,
+                            "Turn on Owner as Technician to assign jobs to yourself.");
+                }
+                if (tech != null && !tech.getId().equals(technicianBeforePatch)) {
+                    assertAssignable(ticket);
+                    if (tech.isOwner() && !tech.isOwnerTechEnabled()) {
+                        throw new ResponseStatusException(HttpStatus.CONFLICT,
+                                "Owner as Technician is off - turn it on to assign jobs to yourself.");
+                    }
+                    if (!tech.isOwner() && !tech.isAvailable()) {
+                        throw new ResponseStatusException(HttpStatus.CONFLICT, "This technician is inactive.");
+                    }
+                }
                 if (tech == null) {
                     // Auth may return user id with no technicians row; create one so assignment works
                     tech = technicianRepository.save(Technician.builder()
@@ -900,11 +940,14 @@ public class TicketService {
                 ticket.setAssignedTechnicianId(tech.getId());
                 assignedTechAfterPatch = tech;
             }
-            // Owner-side (re)assignment ALWAYS clears the technician's prior
-            // acceptance. A reassign puts the booking back into "awaiting
-            // acceptance" — the new technician must tap Accept themselves
-            // before the timeline lights up ACCEPTED / WORK_STARTED.
-            ticket.setTechnicianAcceptedAt(null);
+            // A (re)assignment to a DIFFERENT technician clears the prior
+            // acceptance: the new technician must tap Accept themselves before
+            // continuing. Re-sending the same technician is a no-op. Allowed
+            // only before Out for Delivery (assertAssignable).
+            if (!java.util.Objects.equals(technicianBeforePatch, ticket.getAssignedTechnicianId())) {
+                assertAssignable(ticket);
+                ticket.setTechnicianAcceptedAt(null);
+            }
         }
 
         String statusBeforePatch = ticket.getStatus();
@@ -976,8 +1019,13 @@ public class TicketService {
             } else {
                 // One row per re-assignment (history with real timestamps),
                 // not one row overwritten each time.
+                String oldName = technicianRepository.findById(technicianBeforePatch)
+                        .map(Technician::getName).filter(n -> !n.isBlank()).orElse("Technician");
+                Object reason = body.get("reassignReason");
+                String why = reason == null || String.valueOf(reason).isBlank() ? ""
+                        : " · " + String.valueOf(reason).trim();
                 appendBookingEvent(ticket.getId(), "REASSIGNED_TO_TECHNICIAN",
-                        "Re-assigned to " + techName, "SHOP");
+                        "Re-assigned from " + oldName + " to " + techName + why, "SHOP");
             }
             // The patch above cleared technician_accepted_at, so the booking is
             // waiting on the new technician's tap — re-stamped rather than
@@ -1280,6 +1328,40 @@ public class TicketService {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "The device is being returned unrepaired — resume the repair before re-estimating.");
         }
+    }
+
+    /** Statuses at/after Out for Delivery, or closed: the technician is frozen. */
+    private static final Set<String> ASSIGN_LOCKED_STATUSES = Set.of(
+            "DELIVERED", "DELIVERED_PROCESSING", "DELIVERED_TO_CUSTOMER", "CANCELLED", "CLOSED",
+            "COMPLETED", "RETURNED", "RETURN_DELIVERY");
+
+    /** Assign / Re-Assign is allowed only before Out for Delivery. */
+    void assertAssignable(Ticket ticket) {
+        String st = ticket.getStatus() == null ? "" : ticket.getStatus().toUpperCase(java.util.Locale.ROOT);
+        if (ASSIGN_LOCKED_STATUSES.contains(st)
+                || hasBookingEvent(ticket.getId(), "READY_FOR_DELIVERY")
+                || hasBookingEvent(ticket.getId(), "RETURN_DELIVERY")) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Technician can't be changed once the booking is out for delivery or closed.");
+        }
+    }
+
+    /**
+     * Stale-access guard for technician actions: a shop employee who has a
+     * technicians row may act only on tickets currently assigned to them.
+     * Owners (SHOP_OWNER role) are unaffected.
+     */
+    @Transactional(readOnly = true)
+    public void requireCurrentTechnicianUnlessOwner(UUID shopId, UUID ticketId, UUID userId, boolean owner) {
+        if (owner || userId == null) return;
+        technicianRepository.findByShopIdAndUserId(shopId, userId).ifPresent(me -> {
+            Ticket t = ticketRepository.findByShopIdAndId(shopId, ticketId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + ticketId));
+            if (t.getAssignedTechnicianId() == null || !t.getAssignedTechnicianId().equals(me.getId())) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                        "This booking is assigned to a different technician");
+            }
+        });
     }
 
     private boolean hasBookingEvent(UUID ticketId, String statusKey) {

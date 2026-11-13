@@ -18,6 +18,13 @@ public interface TicketRepository extends JpaRepository<Ticket, UUID> {
 
     Optional<Ticket> findByShopIdAndId(UUID shopId, UUID id);
 
+    /** Row-locked read — serialises concurrent (re)assignments of one ticket. */
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT t FROM Ticket t WHERE t.shopId = :shopId AND t.id = :id")
+    Optional<Ticket> lockByShopIdAndId(@Param("shopId") UUID shopId, @Param("id") UUID id);
+
+    List<Ticket> findByShopIdAndAssignedTechnicianId(UUID shopId, UUID assignedTechnicianId);
+
     Optional<Ticket> findByShopIdAndTrackingId(UUID shopId, String trackingId);
 
     Page<Ticket> findByShopId(UUID shopId, Pageable pageable);
