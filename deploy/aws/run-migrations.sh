@@ -30,6 +30,21 @@ fi
 q() { psql -X -q -At -v ON_ERROR_STOP=1 -c "$1"; }
 num() { local n="${1%%_*}"; echo $((10#$n)); }
 
+# pg_dump refuses a server newer than itself (RDS was upgraded to 18 while the
+# box had the 16 client). Install the client matching the server's major.
+SERVER_MAJOR=$(q "SHOW server_version_num")
+SERVER_MAJOR=$((SERVER_MAJOR / 10000))
+CLIENT_MAJOR=$(pg_dump --version | grep -oE '[0-9]+' | head -1)
+if [[ "$CLIENT_MAJOR" -lt "$SERVER_MAJOR" ]]; then
+  echo "Upgrading PostgreSQL client $CLIENT_MAJOR -> $SERVER_MAJOR to match the server..."
+  sudo dnf install -y -q --allowerasing "postgresql${SERVER_MAJOR}" >/dev/null \
+    || { echo "ERROR: postgresql${SERVER_MAJOR} client not installable; no backup possible, not migrating." >&2; exit 1; }
+  hash -r
+  CLIENT_MAJOR=$(pg_dump --version | grep -oE '[0-9]+' | head -1)
+  [[ "$CLIENT_MAJOR" -ge "$SERVER_MAJOR" ]] \
+    || { echo "ERROR: pg_dump is still $CLIENT_MAJOR (server $SERVER_MAJOR); not migrating." >&2; exit 1; }
+fi
+
 q "CREATE TABLE IF NOT EXISTS public.schema_migrations (
      filename   VARCHAR(200) PRIMARY KEY,
      checksum   VARCHAR(64)  NOT NULL,
