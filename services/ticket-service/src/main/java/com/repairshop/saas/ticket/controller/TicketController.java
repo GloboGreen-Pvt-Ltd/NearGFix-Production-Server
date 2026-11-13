@@ -38,6 +38,7 @@ public class TicketController {
     private final TicketService ticketService;
     private final ReEstimateWorkflowService reEstimateWorkflow;
     private final com.repairshop.saas.ticket.whatsapp.WhatsAppNotificationService whatsApp;
+    private final com.repairshop.saas.ticket.service.OwnerTechnicianService ownerTechnician;
 
     private UUID shopIdFrom(HttpServletRequest request) {
         String sid = (String) request.getAttribute("shopId");
@@ -64,6 +65,35 @@ public class TicketController {
                 && roles.stream().anyMatch(r -> "SHOP_OWNER".equals(
                         String.valueOf(r).trim().toUpperCase(Locale.ROOT).replaceFirst("^ROLE_", "")));
         return owner ? "OWNER" : null;
+    }
+
+    // ---------- Owner as Technician ----------------------------------------
+
+    private UUID requireOwner(HttpServletRequest request) {
+        if (ownerActorFrom(request) == null) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Only the shop owner can do this");
+        }
+        UUID userId = userIdFrom(request);
+        if (userId == null) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Missing user context");
+        return userId;
+    }
+
+    @GetMapping("/owner-technician")
+    @Operation(summary = "Owner as Technician: setting, technician id and the owner's own job counts")
+    public Map<String, Object> getOwnerTechnician(HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return ownerTechnician.get(shopId, requireOwner(request));
+    }
+
+    @PutMapping("/owner-technician")
+    @Operation(summary = "Owner as Technician ON/OFF (OFF is refused while the owner has active jobs)")
+    public Map<String, Object> setOwnerTechnician(@RequestBody Map<String, Object> body, HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        boolean enabled = Boolean.parseBoolean(String.valueOf(body.get("enabled")));
+        Object name = body.get("name");
+        return ownerTechnician.set(shopId, requireOwner(request), enabled, name == null ? null : String.valueOf(name));
     }
 
     @GetMapping("/counts")
@@ -122,7 +152,7 @@ public class TicketController {
         if (assignedToMe) {
             UUID userId = userIdFrom(request);
             if (userId == null) throw new IllegalStateException("Missing user context");
-            return ticketService.listByAssignedUser(userId, pageable);
+            return ticketService.listByAssignedUser(shopIdFrom(request), userId, pageable);
         }
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
@@ -161,6 +191,9 @@ public class TicketController {
             HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
+        if (body.containsKey("technicianPhotosJson")) {
+            ticketService.requireCurrentTechnicianUnlessOwner(shopId, id, userIdFrom(request), ownerActorFrom(request) != null);
+        }
         return ticketService.patch(shopId, id, body, ownerActorFrom(request), userIdFrom(request));
     }
 
@@ -308,6 +341,7 @@ public class TicketController {
             HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
+        ticketService.requireCurrentTechnicianUnlessOwner(shopId, id, userIdFrom(request), ownerActorFrom(request) != null);
         ticketService.emitProgressStepEvent(shopId, id, body.getStatusKey(), body.getNote(), body.getActor());
     }
 

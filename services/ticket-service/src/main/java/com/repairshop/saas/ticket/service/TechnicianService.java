@@ -71,6 +71,7 @@ public class TechnicianService {
     @Transactional(readOnly = true)
     public List<TechnicianResponse> listByShop(UUID shopId) {
         return technicianRepository.findByShopIdOrderByNameAsc(shopId).stream()
+                .filter(t -> !t.isOwner()) // owner's own row is "Assign to Myself", not an employee
                 .map(this::toResponse)
                 .collect(Collectors.toList());
     }

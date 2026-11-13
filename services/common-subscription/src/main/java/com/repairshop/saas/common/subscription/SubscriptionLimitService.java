@@ -215,7 +215,7 @@ public class SubscriptionLimitService {
      */
     public long countActiveEmployees(UUID shopId) {
         if (shopId == null) return 0L;
-        return count("SELECT COUNT(*) FROM technicians WHERE shop_id = ? AND is_available = true", shopId);
+        return count("SELECT COUNT(*) FROM technicians WHERE shop_id = ? AND is_available = true AND is_owner = false", shopId);
     }
 
     /**

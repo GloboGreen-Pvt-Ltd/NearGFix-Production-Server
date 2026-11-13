@@ -128,7 +128,7 @@ public class OwnerDirectory {
     public Map<UUID, Long> activeEmployeesByShop(UUID ownerUserId) {
         return countByShop("""
                 SELECT t.shop_id AS k, COUNT(*) AS n FROM technicians t JOIN shops s ON s.id = t.shop_id
-                 WHERE s.owner_user_id = :owner AND t.is_available = true GROUP BY t.shop_id
+                 WHERE s.owner_user_id = :owner AND t.is_available = true AND t.is_owner = false GROUP BY t.shop_id
                 """, ownerUserId);
     }
 
@@ -147,7 +147,7 @@ public class OwnerDirectory {
             Map<UUID, Long> out = new HashMap<>();
             jdbc.query("""
                     SELECT s.owner_user_id AS k, COUNT(*) AS n FROM technicians t JOIN shops s ON s.id = t.shop_id
-                     WHERE s.owner_user_id IN (:ids) AND t.is_available = true GROUP BY s.owner_user_id
+                     WHERE s.owner_user_id IN (:ids) AND t.is_available = true AND t.is_owner = false GROUP BY s.owner_user_id
                     """, new MapSqlParameterSource("ids", ownerIds),
                     rs -> { out.put((UUID) rs.getObject("k"), rs.getLong("n")); });
             return out;
