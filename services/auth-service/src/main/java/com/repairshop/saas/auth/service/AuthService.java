@@ -3,6 +3,8 @@ package com.repairshop.saas.auth.service;
 import com.repairshop.saas.auth.dto.CreateShopOwnerRequest;
 import com.repairshop.saas.auth.dto.LoginRequest;
 import com.repairshop.saas.auth.dto.LoginResponse;
+import com.repairshop.saas.auth.exception.ConflictException;
+import com.repairshop.saas.auth.dto.PartnerSignupRequest;
 import com.repairshop.saas.auth.dto.ShopLoginRequest;
 import com.repairshop.saas.auth.dto.RegisterRequest;
 import com.repairshop.saas.auth.dto.RegisterResponse;
@@ -724,6 +726,63 @@ public class AuthService {
                 .name(owner.getName())
                 .shops(summaries)
                 .build();
+    }
+
+    // ---- Partner self sign-up (Partner App "Create Account") -----------------
+
+    private static final String PARTNER_SIGNUP_OTP = "123456"; // mobile OTP default (no SMS gateway yet)
+
+    private static String last10(String mobile) {
+        String d = mobile == null ? "" : mobile.replaceAll("[^0-9]", "");
+        if (d.length() < 10) throw new BadRequestException("Enter a valid 10-digit mobile number");
+        return d.substring(d.length() - 10);
+    }
+
+    /** Step 1: 409 when the owner mobile is already a user or a shop login; else issue the OTP. */
+    @Transactional(readOnly = true)
+    public java.util.Map<String, Object> sendPartnerSignupOtp(String mobile) {
+        String m = last10(mobile);
+        if (findUserByEmailOrPhone(m).isPresent() || findShopByMobile(m).isPresent())
+            throw new ConflictException("This mobile number is already registered. Please log in.");
+        java.util.Map<String, Object> res = new java.util.HashMap<>();
+        res.put("channel", "MOBILE");
+        res.put("sent", true);
+        res.put("target", maskMobile(m));
+        res.put("defaultOtp", PARTNER_SIGNUP_OTP);
+        return res;
+    }
+
+    /**
+     * Step 2: verify the OTP, create the SHOP_OWNER + first shop (same path as
+     * the admin "create shop owner"), activate it (self-registered — the OTP
+     * proves the number) and sign in. KYC stays pending as for any new owner.
+     */
+    @Transactional
+    public LoginResponse partnerSignup(PartnerSignupRequest req) {
+        String m = last10(req.getOwnerMobile());
+        if (!PARTNER_SIGNUP_OTP.equals(req.getOtp() == null ? "" : req.getOtp().trim()))
+            throw new UnauthorizedException("Invalid OTP");
+        if (findUserByEmailOrPhone(m).isPresent() || findShopByMobile(m).isPresent())
+            throw new ConflictException("This mobile number is already registered. Please log in.");
+        String shopMobile = req.getShopMobile() == null || req.getShopMobile().isBlank() ? null : last10(req.getShopMobile());
+
+        CreateShopOwnerRequest.ShopLocationDto loc = new CreateShopOwnerRequest.ShopLocationDto();
+        loc.setName(req.getShopName().trim());
+        loc.setMobile(shopMobile);
+        loc.setAddress(req.getShopAddress().trim());
+        CreateShopOwnerRequest cr = new CreateShopOwnerRequest();
+        cr.setName(req.getOwnerName().trim());
+        cr.setEmail(m + "@partner.local"); // placeholder; login is by mobile (see staff "@staff.local")
+        cr.setPassword(UUID.randomUUID().toString());
+        cr.setPhone(m);
+        cr.setLocations(java.util.List.of(loc));
+        ShopOwnerResponse created = createShopOwner(cr, null);
+
+        User owner = userRepository.findById(created.getOwnerId())
+                .orElseThrow(() -> new BadRequestException("Could not create the account"));
+        owner.setIsActive(true);
+        owner = userRepository.save(owner);
+        return buildLoginResponse(owner, null);
     }
 
     /** 6-field progress score: identity, mobile, address, GST number, front image, certificate (any). */
