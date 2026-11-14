@@ -765,6 +765,10 @@ public class AuthService {
         if (findUserByEmailOrPhone(m).isPresent() || findShopByMobile(m).isPresent())
             throw new ConflictException("This mobile number is already registered. Please log in.");
         String shopMobile = req.getShopMobile() == null || req.getShopMobile().isBlank() ? null : last10(req.getShopMobile());
+        // A shop contact number that is already someone else's login would make that login ambiguous.
+        if (shopMobile != null && !shopMobile.equals(m)
+                && (findUserByEmailOrPhone(shopMobile).isPresent() || findShopByMobile(shopMobile).isPresent()))
+            throw new ConflictException("This shop contact number is already registered.");
 
         CreateShopOwnerRequest.ShopLocationDto loc = new CreateShopOwnerRequest.ShopLocationDto();
         loc.setName(req.getShopName().trim());
