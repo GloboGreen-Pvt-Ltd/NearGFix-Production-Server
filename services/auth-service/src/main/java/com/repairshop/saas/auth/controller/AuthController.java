@@ -7,6 +7,7 @@ import com.repairshop.saas.auth.dto.CustomerLoginRequest;
 import com.repairshop.saas.auth.dto.CustomerRegisterRequest;
 import com.repairshop.saas.auth.dto.LoginRequest;
 import com.repairshop.saas.auth.dto.LoginResponse;
+import com.repairshop.saas.auth.dto.PartnerSignupRequest;
 import com.repairshop.saas.auth.dto.ShopLoginRequest;
 import com.repairshop.saas.auth.dto.RegisterRequest;
 import com.repairshop.saas.auth.dto.RegisterResponse;
@@ -440,6 +441,22 @@ public class AuthController {
             description = "Login platform customer by mobile or email. Returns JWT.")
     public CustomerAuthResponse customerLogin(@Valid @RequestBody CustomerLoginRequest request) {
         return customerAuthService.login(request);
+    }
+
+    @PostMapping("/partner/signup/otp/send")
+    @ResponseStatus(HttpStatus.OK)
+    @Operation(summary = "Partner App Create Account — send OTP",
+            description = "Public. 409 when the owner mobile is already registered (user or shop login).")
+    public Map<String, Object> partnerSignupOtp(@RequestBody Map<String, String> body) {
+        return authService.sendPartnerSignupOtp(body == null ? null : body.get("mobile"));
+    }
+
+    @PostMapping("/partner/signup")
+    @ResponseStatus(HttpStatus.CREATED)
+    @Operation(summary = "Partner App Create Account — verify OTP and register",
+            description = "Public. Verifies the OTP, creates the shop owner + first shop (active, KYC pending) and returns a login session.")
+    public LoginResponse partnerSignup(@Valid @RequestBody PartnerSignupRequest request) {
+        return authService.partnerSignup(request);
     }
 
     @PostMapping("/customer/signup/otp/send")
