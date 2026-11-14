@@ -323,6 +323,8 @@ public class RepairDeliveryService {
         out.put("qcPassed", qcPassed(t));
         out.put("delivery", d.map(x -> {
             Map<String, Object> v = view(x, false);
+            // Status history with real times, for the customer's Service Timeline.
+            v.put("events", eventViews(x.getId()));
             // The OTP is shown to the customer only while the device is on its way.
             if (Set.of("OUT_FOR_DELIVERY", "ARRIVED").contains(x.getStatus()) && x.getOtpExpiresAt() != null
                     && x.getOtpExpiresAt().isAfter(Instant.now())) {
@@ -589,6 +591,10 @@ public class RepairDeliveryService {
         v.put("failReason", d.getFailReason());
         v.put("releasedAt", d.getReleasedAt());
         v.put("collectedAt", d.getCollectedAt());
+        v.put("createdAt", d.getCreatedAt());
+        v.put("acceptedAt", d.getAcceptedAt());
+        v.put("startedAt", d.getStartedAt());
+        v.put("arrivedAt", d.getArrivedAt());
         v.put("deliveredAt", d.getDeliveredAt());
         v.put("returnedAt", d.getReturnedAt());
         if (d.getTechnicianId() != null) {
