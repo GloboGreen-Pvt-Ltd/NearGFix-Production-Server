@@ -728,6 +728,26 @@ public class AuthService {
                 .build();
     }
 
+    // ---- Runtime API keys (app_api_keys, migration 119) ----------------------
+
+    /** Key names the apps may read. Anything else is never served. */
+    private static final java.util.Set<String> SERVED_API_KEYS = java.util.Set.of("GOOGLE_MAPS");
+
+    /** Active key value for an allow-listed name, or null (not set / table missing). */
+    @Transactional(readOnly = true)
+    public String getApiKey(String name) {
+        String n = name == null ? "" : name.trim().toUpperCase();
+        if (!SERVED_API_KEYS.contains(n)) throw new BadRequestException("Unknown key");
+        try {
+            List<String> rows = jdbc.queryForList(
+                    "SELECT key_value FROM app_api_keys WHERE key_name = ? AND is_active = TRUE", String.class, n);
+            String v = rows.isEmpty() ? null : rows.get(0);
+            return v == null || v.isBlank() ? null : v.trim();
+        } catch (org.springframework.dao.DataAccessException e) {
+            return null; // migration 119 not applied yet
+        }
+    }
+
     // ---- Partner self sign-up (Partner App "Create Account") -----------------
 
     private static final String PARTNER_SIGNUP_OTP = "123456"; // mobile OTP default (no SMS gateway yet)

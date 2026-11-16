@@ -443,6 +443,18 @@ public class AuthController {
         return customerAuthService.login(request);
     }
 
+    @GetMapping("/api-keys/{name}")
+    @ResponseStatus(HttpStatus.OK)
+    @Operation(summary = "Runtime API key for the apps",
+            description = "Signed-in users only. Returns { name, key } from app_api_keys for an allow-listed name (GOOGLE_MAPS); key is null when not set.")
+    public Map<String, Object> apiKey(HttpServletRequest httpRequest, @PathVariable String name) {
+        requireUserId(httpRequest);
+        Map<String, Object> out = new java.util.HashMap<>();
+        out.put("name", name.toUpperCase());
+        out.put("key", authService.getApiKey(name));
+        return out;
+    }
+
     @PostMapping("/partner/signup/otp/send")
     @ResponseStatus(HttpStatus.OK)
     @Operation(summary = "Partner App Create Account — send OTP",

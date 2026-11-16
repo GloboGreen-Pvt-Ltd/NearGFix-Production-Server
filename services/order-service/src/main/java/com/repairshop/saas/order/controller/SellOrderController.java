@@ -429,6 +429,60 @@ public class SellOrderController {
         return ResponseEntity.ok(toResponseWithQuotes(s));
     }
 
+    /** Statuses where the customer may still set / move the pickup time (before the journey starts). */
+    private static final java.util.Set<String> CUSTOMER_SCHEDULABLE = java.util.Set.of(
+            "SELL_CONFIRMED", "PICKUP_SCHEDULED", "PICKUP_ASSIGNED");
+    private static final java.time.ZoneId IST = java.time.ZoneId.of("Asia/Kolkata");
+
+    /**
+     * Customer app "Schedule Pickup": saves the chosen date + slot on the sell
+     * order so the shop (Partner Buy → Assign Pickup / Tracking) sees the same
+     * time. Body: { pickupDate: "yyyy-MM-dd", slotStart: "HH:mm", slotEnd?: "HH:mm" }.
+     */
+    @PostMapping("/{id}/schedule")
+    @Transactional
+    public ResponseEntity<SellOrderResponse> schedule(HttpServletRequest req, @PathVariable UUID id,
+                                                      @RequestBody Map<String, String> body) {
+        UUID userId = callerId(req);
+        SellOrder s = sellRepo.findById(id).orElseThrow(() -> new ResourceNotFoundException("Sell order not found"));
+        if (!s.getCustomerUserId().equals(userId)) throw new ForbiddenException("Not your sell order");
+        if (!CUSTOMER_SCHEDULABLE.contains(String.valueOf(s.getStatus()).toUpperCase())) {
+            throw new com.repairshop.saas.order.exception.ConflictException("The pickup time can't be changed any more");
+        }
+        java.time.LocalDate date;
+        java.time.LocalTime start;
+        java.time.LocalTime end;
+        try {
+            date = java.time.LocalDate.parse(java.util.Objects.requireNonNull(body == null ? null : body.get("pickupDate")));
+            start = java.time.LocalTime.parse(java.util.Objects.requireNonNull(body.get("slotStart")));
+            String e = body.get("slotEnd");
+            end = e == null || e.isBlank() ? start.plusHours(2) : java.time.LocalTime.parse(e);
+        } catch (java.time.format.DateTimeParseException | NullPointerException ex) {
+            throw new IllegalArgumentException("Pick a valid date and time");
+        }
+        java.time.LocalDate today = java.time.LocalDate.now(IST);
+        if (date.isBefore(today)) throw new IllegalArgumentException("Pick a date from today");
+        if (date.isAfter(today.plusDays(60))) throw new IllegalArgumentException("Pick a date within the next 60 days");
+        if (!end.isAfter(start)) end = start.plusHours(2);
+
+        boolean moved = s.getPickupDate() != null;
+        s.setPickupDate(date);
+        s.setPickupSlotStart(start);
+        s.setPickupSlotEnd(end);
+        if ("SELL_CONFIRMED".equalsIgnoreCase(s.getStatus())) s.setStatus("PICKUP_SCHEDULED");
+        sellRepo.save(s);
+        if (s.getShopId() != null) {
+            String when = date.format(java.time.format.DateTimeFormatter.ofPattern("dd MMM yyyy")) + ", "
+                    + start.format(java.time.format.DateTimeFormatter.ofPattern("hh:mm a"));
+            shopNotificationRepo.save(ShopNotification.builder()
+                    .shopId(s.getShopId()).bookingId(s.getId()).bookingNumber(s.getSellNumber())
+                    .statusKey(moved ? "SELL_PICKUP_RESCHEDULED_BY_CUSTOMER" : "SELL_PICKUP_SCHEDULED_BY_CUSTOMER")
+                    .title(moved ? "Customer changed the pickup time" : "Customer chose a pickup time")
+                    .body(String.format("%s: %s.", s.getSellNumber(), when)).type("purchase").read(false).build());
+        }
+        return ResponseEntity.ok(toResponseWithQuotes(s));
+    }
+
     private SellOrderResponse toResponse(SellOrder s) {
         return SellOrderResponse.builder()
                 .id(s.getId()).sellNumber(s.getSellNumber()).shopId(s.getShopId()).addressId(s.getAddressId())
