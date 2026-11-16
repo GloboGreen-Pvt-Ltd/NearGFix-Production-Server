@@ -1210,6 +1210,16 @@ public class AuthService {
         return buildLoginResponse(user, null);
     }
 
+    /** Re-verifies the signed-in account with the same login OTP (PIN reset). */
+    public boolean verifyAccountOtp(UUID userId, String identifier, String otp) {
+        if (userId == null || identifier == null || otp == null || otp.isBlank()) return false;
+        String id = identifier.trim();
+        boolean isEmail = id.contains("@");
+        User user = (isEmail ? userRepository.findByEmail(id) : findUserByEmailOrPhone(id)).orElse(null);
+        if (user == null || !userId.equals(user.getId())) return false; // only your own account
+        return isEmail ? otpStore.verify(id, otp.trim()) : "123456".equals(otp.trim());
+    }
+
     private static String maskEmail(String email) {
         int at = email.indexOf('@');
         if (at <= 1) return "***" + (at >= 0 ? email.substring(at) : "");
