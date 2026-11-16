@@ -67,6 +67,21 @@ public class TicketService {
     private final com.repairshop.saas.common.notify.ShopPushService shopPush;
     private final com.repairshop.saas.common.notify.PushService pushService;
 
+    /** Records the PIN-verified "Booked By" on a just-created ticket (set once). */
+    @Transactional
+    public TicketResponse recordBookedBy(UUID shopId, UUID id, UUID userId, String name, String role) {
+        Ticket t = ticketRepository.findByShopIdAndId(shopId, id)
+                .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
+        if (t.getBookedByUserId() == null) {
+            t.setBookedByUserId(userId);
+            t.setBookedByName(name);
+            t.setBookedByRole(role);
+            t.setBookedAt(Instant.now());
+            ticketRepository.save(t);
+        }
+        return toResponse(t);
+    }
+
     @Transactional
     public TicketResponse getById(UUID shopId, UUID id) {
         Ticket t = ticketRepository.findByShopIdAndId(shopId, id)
@@ -2084,6 +2099,9 @@ public class TicketService {
                 .estimatedReadyAt(fallback.estimatedReadyAt)
                 .estimatedDeliveryAt(fallback.estimatedDeliveryAt)
                 .originalEstimatedDeliveryAt(t.getOriginalEstimatedDeliveryAt())
+                .bookedByName(t.getBookedByName())
+                .bookedByRole(t.getBookedByRole())
+                .bookedAt(t.getBookedAt())
                 .invoiceId(invoice != null ? invoice.getId() : null)
                 .invoiceNo(invoice != null ? invoice.getInvoiceNo() : null)
                 .invoiceGeneratedAt(invoice != null ? invoice.getGeneratedAt() : null)

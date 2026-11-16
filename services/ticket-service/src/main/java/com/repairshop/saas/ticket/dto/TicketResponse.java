@@ -151,6 +151,15 @@ public class TicketResponse {
     @Schema(description = "The booking's first estimated delivery, kept once a re-estimate revises estimatedDeliveryAt; null when never re-estimated")
     private Instant originalEstimatedDeliveryAt;
 
+    @Schema(description = "Booked By: name of the employee/owner whose PIN was verified at submit; null for older bookings")
+    private String bookedByName;
+
+    @Schema(description = "Booked By role: EMPLOYEE or OWNER")
+    private String bookedByRole;
+
+    @Schema(description = "When the PIN-verified booking was submitted")
+    private Instant bookedAt;
+
     @Schema(description = "Assigned technician name (denormalized for customer-side render)")
     private String assignedTechnicianName;
 

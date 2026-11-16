@@ -49,6 +49,7 @@ public class AuthController {
     private final CustomerAuthService customerAuthService;
     private final JwtService jwtService;
     private final com.repairshop.saas.auth.service.EmployeePinService employeePinService;
+    private final com.repairshop.saas.auth.service.BookingPinService bookingPinService;
 
     @PostMapping("/login")
     @ResponseStatus(HttpStatus.OK)
@@ -109,6 +110,18 @@ public class AuthController {
     public Map<String, Object> pinSet(HttpServletRequest req, @RequestBody Map<String, String> body) {
         Map<String, String> b = body == null ? Map.of() : body;
         return employeePinService.set(callerId(req), b.get("currentPin"), b.get("pin"));
+    }
+
+    @PostMapping("/booking-pin/verify")
+    @Operation(summary = "Verify an employee PIN for a repair booking",
+            description = "Matches the PIN against active staff of the caller's shop (or the signed-in owner); returns the name and a 5-minute booking token")
+    public Map<String, Object> bookingPinVerify(HttpServletRequest req, @RequestBody Map<String, String> body) {
+        String header = req.getHeader("Authorization");
+        if (header == null || !header.startsWith("Bearer "))
+            throw new UnauthorizedException("Missing or invalid Authorization header");
+        String token = header.substring("Bearer ".length()).trim();
+        return bookingPinService.verify(jwtService.getUserId(token), jwtService.getShopId(token),
+                jwtService.getRoles(token), body == null ? null : body.get("pin"));
     }
 
     @PostMapping("/me/pin/reset")
