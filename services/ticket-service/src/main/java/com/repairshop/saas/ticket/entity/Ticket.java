@@ -230,6 +230,19 @@ public class Ticket {
     @Column(name = "original_estimated_delivery_at")
     private Instant originalEstimatedDeliveryAt;
 
+    /** "Booked By": employee/owner whose PIN was verified server-side at submit (migration 120). */
+    @Column(name = "booked_by_user_id")
+    private UUID bookedByUserId;
+
+    @Column(name = "booked_by_name", length = 150)
+    private String bookedByName;
+
+    @Column(name = "booked_by_role", length = 20)
+    private String bookedByRole;
+
+    @Column(name = "booked_at")
+    private Instant bookedAt;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 

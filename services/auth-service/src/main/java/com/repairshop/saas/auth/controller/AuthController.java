@@ -48,6 +48,8 @@ public class AuthController {
     private final AuthService authService;
     private final CustomerAuthService customerAuthService;
     private final JwtService jwtService;
+    private final com.repairshop.saas.auth.service.EmployeePinService employeePinService;
+    private final com.repairshop.saas.auth.service.BookingPinService bookingPinService;
 
     @PostMapping("/login")
     @ResponseStatus(HttpStatus.OK)
@@ -80,6 +82,53 @@ public class AuthController {
             throw new UnauthorizedException("Missing or invalid Authorization header");
         UUID userId = jwtService.getUserId(header.substring("Bearer ".length()).trim());
         return authService.getShopOwner(userId);
+    }
+
+    // ---- Employee app PIN (own account only; user id from the JWT) ------------
+
+    private UUID callerId(HttpServletRequest req) {
+        String header = req.getHeader("Authorization");
+        if (header == null || !header.startsWith("Bearer "))
+            throw new UnauthorizedException("Missing or invalid Authorization header");
+        return jwtService.getUserId(header.substring("Bearer ".length()).trim());
+    }
+
+    @GetMapping("/me/pin")
+    @Operation(summary = "PIN status", description = "pinSet / locked / attemptsLeft for the caller")
+    public Map<String, Object> pinStatus(HttpServletRequest req) {
+        return employeePinService.status(callerId(req));
+    }
+
+    @PostMapping("/me/pin/verify")
+    @Operation(summary = "Verify own PIN", description = "5 wrong tries lock the PIN for 15 minutes")
+    public Map<String, Object> pinVerify(HttpServletRequest req, @RequestBody Map<String, String> body) {
+        return employeePinService.verify(callerId(req), body == null ? null : body.get("pin"));
+    }
+
+    @PutMapping("/me/pin")
+    @Operation(summary = "Create / change own PIN", description = "Changing needs currentPin")
+    public Map<String, Object> pinSet(HttpServletRequest req, @RequestBody Map<String, String> body) {
+        Map<String, String> b = body == null ? Map.of() : body;
+        return employeePinService.set(callerId(req), b.get("currentPin"), b.get("pin"));
+    }
+
+    @PostMapping("/booking-pin/verify")
+    @Operation(summary = "Verify an employee PIN for a repair booking",
+            description = "Matches the PIN against active staff of the caller's shop (or the signed-in owner); returns the name and a 5-minute booking token")
+    public Map<String, Object> bookingPinVerify(HttpServletRequest req, @RequestBody Map<String, String> body) {
+        String header = req.getHeader("Authorization");
+        if (header == null || !header.startsWith("Bearer "))
+            throw new UnauthorizedException("Missing or invalid Authorization header");
+        String token = header.substring("Bearer ".length()).trim();
+        return bookingPinService.verify(jwtService.getUserId(token), jwtService.getShopId(token),
+                jwtService.getRoles(token), body == null ? null : body.get("pin"));
+    }
+
+    @PostMapping("/me/pin/reset")
+    @Operation(summary = "Reset forgotten PIN", description = "Needs the login OTP for the caller's own account")
+    public Map<String, Object> pinReset(HttpServletRequest req, @RequestBody Map<String, String> body) {
+        Map<String, String> b = body == null ? Map.of() : body;
+        return employeePinService.reset(callerId(req), b.get("identifier"), b.get("otp"), b.get("pin"));
     }
 
     @GetMapping("/me/kyc-documents")
