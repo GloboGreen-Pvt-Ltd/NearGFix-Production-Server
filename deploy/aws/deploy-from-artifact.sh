@@ -92,6 +92,12 @@ ensure_env_file() {
     google_vision_key="$(read_env_value GOOGLE_VISION_API_KEY)"
   fi
 
+  # Google Places server key (auth-service /auth/places/*). Same rule.
+  google_places_key="${GOOGLE_PLACES_SERVER_API_KEY:-}"
+  if [[ -z "$google_places_key" ]]; then
+    google_places_key="$(read_env_value GOOGLE_PLACES_SERVER_API_KEY)"
+  fi
+
   # Razorpay (subscription-service UPI checkout). Same rule: the workflow
   # secret when passed, else the value already on the box. Empty keys are fine
   # — the service then answers "Payments are not configured".
@@ -189,6 +195,7 @@ AWS_REGION=$aws_region
 AWS_S3_BUCKET=$aws_bucket
 AWS_S3_BASE_URL=$aws_base_url
 GOOGLE_VISION_API_KEY=$google_vision_key
+GOOGLE_PLACES_SERVER_API_KEY=$google_places_key
 RAZORPAY_KEY_ID=$rzp_key_id
 RAZORPAY_KEY_SECRET=$rzp_key_secret
 RAZORPAY_WEBHOOK_SECRET=$rzp_webhook_secret
