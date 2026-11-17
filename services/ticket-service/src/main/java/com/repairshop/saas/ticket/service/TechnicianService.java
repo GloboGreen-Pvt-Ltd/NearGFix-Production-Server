@@ -584,6 +584,41 @@ public class TechnicianService {
         return toAttendanceRecord(a, t.getDefaultCheckIn());
     }
 
+    /**
+     * TPIN-gated check-in (migration 123): consumes the one-time authorization
+     * and records the punch in one transaction, stamping UTC check_in_at.
+     */
+    @Transactional
+    public AttendanceRecordResponse recordCheckIn(UUID shopId, UUID userId, String notes, Double latitude,
+                                                  Double longitude, java.util.function.Supplier<UUID> tpin) {
+        UUID authId = tpin.get();
+        AttendanceRecordResponse res = recordCheckIn(shopId, userId, notes, latitude, longitude);
+        // Close stale open punches (forgotten checkout > 20h ago) so they don't block today's check-in.
+        jdbc.update("""
+                UPDATE technician_attendance SET check_out_at = now()
+                 WHERE technician_id = (SELECT id FROM technicians WHERE shop_id = ? AND user_id = ?)
+                   AND check_in_at IS NOT NULL AND check_out_at IS NULL AND check_in_at < now() - interval '20 hours'""",
+                shopId, userId);
+        jdbc.update("""
+                UPDATE technician_attendance SET check_in_at = now(), check_out_at = NULL, shop_id = ?, check_in_txn_auth_id = ?
+                 WHERE technician_id = (SELECT id FROM technicians WHERE shop_id = ? AND user_id = ?) AND attendance_date = ?""",
+                shopId, authId, shopId, userId, LocalDate.now(IST));
+        return res;
+    }
+
+    /** TPIN-gated check-out: consumes authorization and closes the open UTC punch atomically. */
+    @Transactional
+    public AttendanceRecordResponse recordCheckOut(UUID shopId, UUID userId, String notes, Double latitude,
+                                                   Double longitude, java.util.function.Supplier<UUID> tpin) {
+        UUID authId = tpin.get();
+        AttendanceRecordResponse res = recordCheckOut(shopId, userId, notes, latitude, longitude);
+        jdbc.update("""
+                UPDATE technician_attendance SET check_out_at = now(), check_out_txn_auth_id = ?
+                 WHERE technician_id = (SELECT id FROM technicians WHERE shop_id = ? AND user_id = ?)
+                   AND check_in_at IS NOT NULL AND check_out_at IS NULL""", authId, shopId, userId);
+        return res;
+    }
+
     /** Technician check-out for today. Updates today's attendance with checkOutTime. */
     @Transactional
     public AttendanceRecordResponse recordCheckOut(UUID shopId, UUID userId, String notes,
@@ -591,9 +626,15 @@ public class TechnicianService {
         Technician t = technicianRepository.findByShopIdAndUserId(shopId, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Technician profile not found"));
         LocalDate today = LocalDate.now(IST);
+        // Overnight shifts: a shift that started yesterday and is still open is
+        // closed by today's check-out (the punch belongs to its start date).
         TechnicianAttendance a = attendanceRepository.findByTechnicianIdAndAttendanceDate(t.getId(), today)
+                .filter(x -> x.getCheckInTime() != null)
+                .or(() -> attendanceRepository.findByTechnicianIdAndAttendanceDate(t.getId(), today.minusDays(1))
+                        .filter(x -> x.getCheckInTime() != null && x.getCheckOutTime() == null))
                 .orElseThrow(() -> new ResourceNotFoundException("No check-in found for today. Check in first."));
         LocalTime now = LocalTime.now(IST);
+        boolean overnight = !today.equals(a.getAttendanceDate());
         // Same 100m geofence as check-in — you must be at the shop to punch out.
         enforceShopGeofence(t.getShopId(), latitude, longitude);
         // Early-checkout guard: no leaving before the duty end time unless an
@@ -602,6 +643,7 @@ public class TechnicianService {
         a.setCheckOutTime(now);
         if (a.getCheckInTime() != null) {
             long min = Duration.between(a.getCheckInTime(), now).toMinutes();
+            if (overnight || min < 0) min += 24 * 60;
             a.setWorkingMinutes((int) Math.max(0, min));
         }
         if (latitude != null) a.setCheckOutLatitude(BigDecimal.valueOf(latitude));

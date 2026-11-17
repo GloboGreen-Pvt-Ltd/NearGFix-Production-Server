@@ -115,7 +115,7 @@ public class AuthService {
                 // freshly-issued OtpStore code (email "sign in with OTP"). Static is
                 // checked first so a valid one doesn't consume the single-use code.
                 String entered = request.getOtp().trim();
-                boolean ok = (user.getOtpCode() != null && user.getOtpCode().equals(entered))
+                boolean ok = OtpPolicy.staticMatch(user.getOtpCode(), entered)
                         || otpStore.verify(request.getEmail().trim(), entered);
                 if (!ok)
                     throw new UnauthorizedException("Invalid OTP");
@@ -166,7 +166,7 @@ public class AuthService {
             throw new UnauthorizedException("Shop is not linked to an owner — use email login");
 
         if (usingOtp) {
-            if (shop.getMobileOtpCode() == null || !shop.getMobileOtpCode().equals(request.getOtp().trim()))
+            if (!OtpPolicy.staticMatch(shop.getMobileOtpCode(), request.getOtp()))
                 throw new UnauthorizedException("Invalid OTP");
         } else {
             if (shop.getMobilePasswordHash() == null
@@ -750,7 +750,7 @@ public class AuthService {
         res.put("channel", "MOBILE");
         res.put("sent", true);
         res.put("target", maskMobile(m));
-        res.put("defaultOtp", PARTNER_SIGNUP_OTP);
+        OtpPolicy.devHint(res, "defaultOtp", PARTNER_SIGNUP_OTP);
         return res;
     }
 
@@ -762,7 +762,7 @@ public class AuthService {
     @Transactional
     public LoginResponse partnerSignup(PartnerSignupRequest req) {
         String m = last10(req.getOwnerMobile());
-        if (!PARTNER_SIGNUP_OTP.equals(req.getOtp() == null ? "" : req.getOtp().trim()))
+        if (!OtpPolicy.staticMatch(PARTNER_SIGNUP_OTP, req.getOtp()))
             throw new UnauthorizedException("Invalid OTP");
         if (findUserByEmailOrPhone(m).isPresent() || findShopByMobile(m).isPresent())
             throw new ConflictException("This mobile number is already registered. Please log in.");
@@ -1182,12 +1182,12 @@ public class AuthService {
             res.put("sent", sent);
             res.put("target", maskEmail(id));
             res.put("ttlMinutes", 10);
-            res.put("devOtp", code); // dev convenience; production clients ignore this
+            OtpPolicy.devHint(res, "devOtp", code); // dev mode only
         } else {
             res.put("channel", "MOBILE");
             res.put("sent", true);
             res.put("target", maskMobile(id));
-            res.put("defaultOtp", "123456");
+            OtpPolicy.devHint(res, "defaultOtp", OtpPolicy.DEFAULT_OTP);
         }
         res.put("email", isEmail ? id : user.getEmail());
         // The account type the login would produce (same mapping as the login
@@ -1215,7 +1215,7 @@ public class AuthService {
         boolean isEmail = id.contains("@");
         User user = (isEmail ? userRepository.findByEmail(id) : findUserByEmailOrPhone(id))
                 .orElseThrow(() -> new BadRequestException("No account found."));
-        boolean ok = isEmail ? otpStore.verify(id, otp.trim()) : "123456".equals(otp.trim());
+        boolean ok = isEmail ? otpStore.verify(id, otp.trim()) : OtpPolicy.staticMatch(OtpPolicy.DEFAULT_OTP, otp);
         if (!ok)
             throw new UnauthorizedException("Invalid or expired OTP.");
         user.setPasswordHash(passwordEncoder.encode(newPassword.trim()));
@@ -1231,7 +1231,7 @@ public class AuthService {
         boolean isEmail = id.contains("@");
         User user = (isEmail ? userRepository.findByEmail(id) : findUserByEmailOrPhone(id)).orElse(null);
         if (user == null || !userId.equals(user.getId())) return false; // only your own account
-        return isEmail ? otpStore.verify(id, otp.trim()) : "123456".equals(otp.trim());
+        return isEmail ? otpStore.verify(id, otp.trim()) : OtpPolicy.staticMatch(OtpPolicy.DEFAULT_OTP, otp);
     }
 
     private static String maskEmail(String email) {
