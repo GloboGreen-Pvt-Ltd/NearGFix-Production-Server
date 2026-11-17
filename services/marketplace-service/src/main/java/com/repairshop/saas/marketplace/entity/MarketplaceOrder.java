@@ -55,6 +55,9 @@ public class MarketplaceOrder {
     @Column(name = "photos_json", columnDefinition = "TEXT") private String photosJson;
     @Column(name = "note", columnDefinition = "TEXT") private String note;
     @Column(name = "verified_imei", length = 40) private String verifiedImei;
+    // Shop Pickup PIN (home delivery): regenerated on assign, cleared after pickup.
+    @Column(name = "pickup_pin", length = 6) private String pickupPin;
+    @Column(name = "pickup_pin_expires_at") private Instant pickupPinExpiresAt;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;

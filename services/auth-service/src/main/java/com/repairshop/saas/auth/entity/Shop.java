@@ -85,6 +85,12 @@ public class Shop {
     @Column(length = 50)
     private String timezone;
 
+    @Column(name = "whatsapp_number", length = 20)
+    private String whatsappNumber;
+
+    @Column(name = "google_place_id", length = 255)
+    private String googlePlaceId;
+
     @Column(name = "pickup_from_time", length = 16)
     private String pickupFromTime;
 

@@ -695,6 +695,8 @@ public class AuthService {
                     .gstNumber(loc.getGstNumber())
                     .latitude(loc.getLatitude())
                     .longitude(loc.getLongitude())
+                    .whatsappNumber(loc.getWhatsappNumber())
+                    .googlePlaceId(loc.getGooglePlaceId())
                     .frontImageUrl(loc.getFrontImageUrl())
                     .bannerImageUrl(loc.getBannerImageUrl())
                     .pickupFromTime(loc.getPickupFromTime())
@@ -774,6 +776,18 @@ public class AuthService {
         loc.setName(req.getShopName().trim());
         loc.setMobile(shopMobile);
         loc.setAddress(req.getShopAddress().trim());
+        // Optional (newer apps): owner WhatsApp + confirmed Google Maps location.
+        String wa = req.getOwnerWhatsapp() == null || req.getOwnerWhatsapp().isBlank() ? m : last10(req.getOwnerWhatsapp());
+        if (wa == null || !wa.matches("[0-9]{10}")) throw new BadRequestException("Enter a valid 10-digit WhatsApp number");
+        loc.setWhatsappNumber(wa);
+        if (req.getPincode() != null && req.getPincode().trim().matches("[0-9]{6}")) loc.setPincode(req.getPincode().trim());
+        if (req.getLatitude() != null && req.getLongitude() != null
+                && Math.abs(req.getLatitude().doubleValue()) <= 90 && Math.abs(req.getLongitude().doubleValue()) <= 180) {
+            loc.setLatitude(req.getLatitude());
+            loc.setLongitude(req.getLongitude());
+        }
+        if (req.getGooglePlaceId() != null && !req.getGooglePlaceId().isBlank())
+            loc.setGooglePlaceId(req.getGooglePlaceId().trim().length() > 255 ? null : req.getGooglePlaceId().trim());
         CreateShopOwnerRequest cr = new CreateShopOwnerRequest();
         cr.setName(req.getOwnerName().trim());
         cr.setEmail(m + "@partner.local"); // placeholder; login is by mobile (see staff "@staff.local")

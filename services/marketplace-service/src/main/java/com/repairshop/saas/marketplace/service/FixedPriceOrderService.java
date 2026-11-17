@@ -15,6 +15,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
 import java.security.SecureRandom;
+import java.time.Instant;
 import java.util.*;
 
 /**
@@ -119,7 +120,16 @@ public class FixedPriceOrderService {
         return orders.findByShopIdAndProductIdIsNotNullOrderByCreatedAtDesc(shopId).stream().map(o -> view(o, false)).toList();
     }
 
-    public Map<String, Object> shopOrder(UUID shopId, UUID id) { return detail(shopOwned(shopId, load(id)), false); }
+    public Map<String, Object> shopOrder(UUID shopId, UUID id) {
+        MarketplaceOrder o = shopOwned(shopId, load(id));
+        Map<String, Object> m = detail(o, false);
+        // Only the shop sees its Pickup PIN, and only while a pickup is pending.
+        boolean usable = o.getPickupPin() != null && PIN_STAGES.contains(o.getStatus())
+                && o.getPickupPinExpiresAt() != null && o.getPickupPinExpiresAt().isAfter(Instant.now());
+        m.put("pickupPin", usable ? o.getPickupPin() : null);
+        m.put("pickupPinExpiresAt", usable ? o.getPickupPinExpiresAt() : null);
+        return m;
+    }
 
     @Transactional
     public Map<String, Object> shopAction(UUID shopId, UUID actor, UUID id, String action, Map<String, Object> body) {
@@ -145,6 +155,7 @@ public class FixedPriceOrderService {
                 if (!isShopEmployee(staff, o.getShopId())) throw bad("Employee does not belong to this shop");
                 boolean re = o.getAssignedStaffUserId() != null;
                 o.setAssignedStaffUserId(staff);
+                newPickupPin(o); // a new PIN per (re)assignment: an old one never works
                 return move(o, "ASSIGNED", actor, "SHOP", re ? "Reassigned" : null, false);
             }
             case "handover" -> { // visit shop: customer paid in store and showed the OTP
@@ -193,9 +204,17 @@ public class FixedPriceOrderService {
             case "decline" -> { require(o, "ASSIGNED"); o.setAssignedStaffUserId(null); }
             case "pickup" -> {
                 require(o, "ACCEPTED");
-                if (!Boolean.TRUE.equals(body.get("productVerified"))) throw bad("Verify product, IMEI, quantity and condition first");
-                o.setVerifiedImei(verifyImei(o, str(body.get("imei"))));
-                savePhotos(o, body, 1);
+                if (body.get("pin") != null) {
+                    // PIN flow: product / quantity / condition checked + shop PIN; no IMEI or photos at this step.
+                    if (!Boolean.TRUE.equals(body.get("productVerified"))) throw bad("Verify product, quantity and condition first");
+                    verifyPickupPin(o, str(body.get("pin")));
+                } else { // older Employee apps: unchanged photo + IMEI proof
+                    if (!Boolean.TRUE.equals(body.get("productVerified"))) throw bad("Verify product, IMEI, quantity and condition first");
+                    o.setVerifiedImei(verifyImei(o, str(body.get("imei"))));
+                    savePhotos(o, body, 1);
+                }
+                o.setPickupPin(null); // single use
+                o.setPickupPinExpiresAt(null);
             }
             case "start-delivery" -> require(o, "PICKED_UP");
             case "deliver" -> {
@@ -214,6 +233,32 @@ public class FixedPriceOrderService {
     }
 
     // ---------- helpers ----------
+
+    private static final Set<String> PIN_STAGES = Set.of("ASSIGNED", "ACCEPTED");
+    private static final int PIN_MAX_TRIES = 5;
+    private static final java.time.Duration PIN_TTL = java.time.Duration.ofHours(24);
+    // Wrong tries per order (a thrown error rolls the transaction back, so not in the row).
+    private final Map<UUID, int[]> pinTries = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private void newPickupPin(MarketplaceOrder o) {
+        o.setPickupPin(String.format("%04d", RANDOM.nextInt(10_000)));
+        o.setPickupPinExpiresAt(Instant.now().plus(PIN_TTL));
+        pinTries.remove(o.getId());
+    }
+
+    private void verifyPickupPin(MarketplaceOrder o, String pin) {
+        if (o.getPickupPin() == null || o.getPickupPinExpiresAt() == null || o.getPickupPinExpiresAt().isBefore(Instant.now()))
+            throw bad("Pickup PIN expired. Ask the shop to reassign the pickup.");
+        int[] t = pinTries.computeIfAbsent(o.getId(), k -> new int[1]);
+        synchronized (t) {
+            if (t[0] >= PIN_MAX_TRIES) throw bad("Too many wrong PINs. Ask the shop to reassign the pickup.");
+            if (pin == null || !java.security.MessageDigest.isEqual(pin.getBytes(), o.getPickupPin().getBytes())) {
+                t[0]++;
+                throw bad("Invalid pickup PIN (" + (PIN_MAX_TRIES - t[0]) + " tries left)");
+            }
+        }
+        pinTries.remove(o.getId());
+    }
 
     private void verifyPaymentAndOtp(MarketplaceOrder o, Map<String, Object> body) {
         Object amt = body.get("amountCollected");

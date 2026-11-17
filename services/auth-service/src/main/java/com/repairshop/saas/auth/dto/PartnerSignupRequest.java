@@ -17,4 +17,10 @@ public class PartnerSignupRequest {
     private String shopMobile;
     @NotBlank(message = "Shop address is required") private String shopAddress;
     @NotBlank(message = "OTP is required") private String otp;
+    // Optional — older apps omit them. Blank WhatsApp = owner mobile.
+    private String ownerWhatsapp;
+    @Size(max = 10) private String pincode;
+    private java.math.BigDecimal latitude;
+    private java.math.BigDecimal longitude;
+    @Size(max = 255) private String googlePlaceId;
 }

@@ -82,6 +82,8 @@ public class CreateShopOwnerRequest {
         private String gstNumber;
         private java.math.BigDecimal latitude;
         private java.math.BigDecimal longitude;
+        private String whatsappNumber;
+        private String googlePlaceId;
         private String frontImageUrl;
         private String bannerImageUrl;
         private String gstCertificateUrl;
