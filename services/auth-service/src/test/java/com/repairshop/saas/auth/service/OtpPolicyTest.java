@@ -131,6 +131,48 @@ class OtpPolicyTest {
     }
 
     @Test
+    void resendAfterReuseWindowInvalidatesPreviousCode() throws Exception {
+        new OtpPolicy(false, M);
+        OtpPolicy.issueTestOtp(M);
+        String first = code();
+        // Make the first code older than the 30 s reuse window, then resend.
+        var f = entry().getClass().getDeclaredField("issued");
+        f.setAccessible(true);
+        var map = OtpPolicy.class.getDeclaredField("TEST_OTPS");
+        map.setAccessible(true);
+        Object old = entry();
+        var ctor = old.getClass().getDeclaredConstructor(String.class, long.class);
+        ctor.setAccessible(true);
+        @SuppressWarnings("unchecked") Map<String, Object> m = (Map<String, Object>) map.get(null);
+        m.put(M, ctor.newInstance(first, System.currentTimeMillis() - 31_000));
+        OtpPolicy.issueTestOtp(M);
+        String latest = code();
+        if (!latest.equals(first))
+            assertThrows(UnauthorizedException.class, () -> OtpPolicy.verifyTestOtp(M, first));   // previous code dead
+        assertTrue(OtpPolicy.verifyTestOtp(M, latest));                                            // latest verifies
+    }
+
+    @Test
+    void sendThenVerifyAcrossFormatsUsesSameCode() throws Exception {
+        new OtpPolicy(false, M);
+        OtpPolicy.issueTestOtp("+91 " + M);            // send with +91 (app / server variants)
+        assertTrue(OtpPolicy.verifyTestOtp("0" + M, code()));
+    }
+
+    @Test
+    void adminLookupReturnsOnlyLiveCodeForAllowListedNumbers() throws Exception {
+        new OtpPolicy(false, M);
+        assertTrue(OtpPolicy.activeTestOtp(M).isEmpty());                 // nothing issued
+        OtpPolicy.issueTestOtp(M);
+        var live = OtpPolicy.activeTestOtp(M).orElseThrow();
+        assertEquals(code(), live.get("code"));
+        assertEquals("******3210", live.get("mobile"));
+        assertTrue(OtpPolicy.activeTestOtp("9000000000").isEmpty());      // not allow-listed
+        assertTrue(OtpPolicy.verifyTestOtp(M, code()));
+        assertTrue(OtpPolicy.activeTestOtp(M).isEmpty());                 // used → gone
+    }
+
+    @Test
     void devModeKeepsLegacyBehaviour() {
         new OtpPolicy(true);
         assertTrue(OtpPolicy.staticMatch("123456", "123456"));

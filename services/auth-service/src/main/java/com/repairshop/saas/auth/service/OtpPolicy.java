@@ -17,9 +17,9 @@ public class OtpPolicy {
 
     // ---- Administrator-controlled test numbers (OTP_TEST_NUMBERS) -------------
     // Only numbers listed in OTP_TEST_NUMBERS get a random, single-use, 5-minute
-    // OTP (never in an API response). The code itself is written to the server log
-    // only while OTP_TEST_LOG_CODES=true (default false) - enable it briefly for a
-    // test session, then turn it off. Unset OTP_TEST_NUMBERS to disable entirely.
+    // OTP. The code is never logged and never returned by the public OTP APIs; an
+    // active ADMIN / SUPER_ADMIN reads it via GET /auth/admin/test-otp (audited).
+    // Unset OTP_TEST_NUMBERS to disable entirely.
     // No universal code and no bypass for any other number.
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(OtpPolicy.class);
     static final long TEST_TTL_MS = 5 * 60 * 1000L;
@@ -30,7 +30,6 @@ public class OtpPolicy {
     static final long TEST_ISSUE_WINDOW_MS = 15 * 60 * 1000L;
     private static final java.security.SecureRandom RNG = new java.security.SecureRandom();
     private static volatile java.util.Set<String> testNumbers = java.util.Set.of();
-    private static volatile boolean logCodes = false;
     private static final java.util.Map<String, TestOtp> TEST_OTPS = new java.util.concurrent.ConcurrentHashMap<>();
     private static final java.util.Map<String, java.util.Deque<Long>> TEST_ISSUES = new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -39,16 +38,12 @@ public class OtpPolicy {
         TestOtp(String code, long issued) { this.code = code; this.issued = issued; this.exp = issued + TEST_TTL_MS; }
     }
 
-    public OtpPolicy(boolean dev) { this(dev, "", false); }
-
-    public OtpPolicy(boolean dev, String numbers) { this(dev, numbers, false); }
+    public OtpPolicy(boolean dev) { this(dev, ""); }
 
     @org.springframework.beans.factory.annotation.Autowired
     public OtpPolicy(@Value("${app.otp.dev-mode:false}") boolean dev,
-                     @Value("${app.otp.test-numbers:}") String numbers,
-                     @Value("${app.otp.test-log-codes:false}") boolean logTestCodes) {
+                     @Value("${app.otp.test-numbers:}") String numbers) {
         devMode = dev;
-        logCodes = logTestCodes;
         java.util.Set<String> set = new java.util.HashSet<>();
         if (numbers != null) for (String n : numbers.split(",")) { String k = norm(n); if (k != null) set.add(k); }
         testNumbers = java.util.Set.copyOf(set);
@@ -90,9 +85,27 @@ public class OtpPolicy {
         }
         String code = String.format("%06d", RNG.nextInt(1_000_000));
         TEST_OTPS.put(k, new TestOtp(code, now));
-        if (logCodes) log.warn("[AUDIT] TEST_OTP_ISSUED mobile={} code={} ttlSeconds={}", mask(k), code, TEST_TTL_MS / 1000);
-        else log.info("[AUDIT] TEST_OTP_ISSUED mobile={} ttlSeconds={}", mask(k), TEST_TTL_MS / 1000);
+        log.warn("[AUDIT] TEST_OTP_ISSUED mobile={} ttlSeconds={}", mask(k), TEST_TTL_MS / 1000);
     }
+
+    /**
+     * The live (unused, unexpired, not locked) test OTP for an allow-listed number, for the
+     * admin-only lookup endpoint. Empty for any other number. Never logs the code.
+     */
+    public static java.util.Optional<java.util.Map<String, Object>> activeTestOtp(String mobile) {
+        if (!isTestNumber(mobile)) return java.util.Optional.empty();
+        String k = norm(mobile);
+        TestOtp t = TEST_OTPS.get(k);
+        if (t == null) return java.util.Optional.empty();
+        synchronized (t) {
+            long left = (t.exp - System.currentTimeMillis()) / 1000;
+            if (t.used || left <= 0 || t.attempts >= TEST_MAX_ATTEMPTS) return java.util.Optional.empty();
+            return java.util.Optional.of(java.util.Map.of("mobile", mask(k), "code", t.code,
+                    "expiresInSeconds", left, "attemptsLeft", TEST_MAX_ATTEMPTS - t.attempts));
+        }
+    }
+
+    static String masked(String mobile) { String k = norm(mobile); return k == null ? "?" : mask(k); }
 
     private static com.repairshop.saas.auth.exception.UnauthorizedException otpError(String msg) {
         return new com.repairshop.saas.auth.exception.UnauthorizedException(msg);
