@@ -315,4 +315,27 @@ class DeviceSecurityServiceDbTest {
         assertThrows(UnauthorizedException.class, () -> empMpinLogin(m, "482916", "dev-a"));           // old MPIN dead
         assertEquals("ACTIVE", empMpinLogin(m, "593027", "dev-b").get("status"));                      // no active device → allowed
     }
+
+    @Test
+    void employeeCannotCreateOrResetOwnLoginMpinButTpinStillWorks() {
+        String m = empMobile();
+        svc.ownerSetEmployeeMpin(b(ownerLogin()), employee, "482916");
+        String t = b(empMpinLogin(m, "482916", "dev-a").get("accessToken"));
+        assertThrows(ForbiddenException.class, () -> svc.createPin(t, "MPIN", "593027"));
+        assertThrows(ForbiddenException.class, () -> svc.resetPin(t, "MPIN", empLogin(), "593027", "OTP"));
+        assertEquals(true, svc.createPin(t, "TPIN", "739154").get("created"));                         // TPIN separate, unchanged
+        assertEquals("ACTIVE", empMpinLogin(m, "482916", "dev-a").get("status"));                     // own MPIN untouched
+    }
+
+    @Test
+    void staffAndPickupRolesUseOwnerSetMpinLogin() {
+        String m = empMobile();
+        for (String role : new String[]{"STAFF", "PICKUP_PERSON"}) {
+            jdbc.update("UPDATE users SET role = ? WHERE id = ?", role, employee);
+            svc.ownerSetEmployeeMpin(b(ownerLogin()), employee, "482916");
+            Map<String, Object> s = empMpinLogin(m, "482916", "dev-a");
+            assertEquals("ACTIVE", s.get("status"), role);
+            assertEquals("EMPLOYEE", s.get("principalType"), role);
+        }
+    }
 }

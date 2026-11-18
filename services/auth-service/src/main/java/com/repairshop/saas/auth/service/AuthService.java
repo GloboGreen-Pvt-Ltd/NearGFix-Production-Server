@@ -109,6 +109,9 @@ public class AuthService {
             User user = userOpt.get();
             if (!Boolean.TRUE.equals(user.getIsActive()))
                 throw new UnauthorizedException(INACTIVE_ACCOUNT_MESSAGE);
+            // Employees: mobile + owner-set MPIN only (/auth/security/employee/login).
+            // Rejected before any OTP/password check so this path can't be probed.
+            rejectEmployee(user);
 
             if (usingOtp) {
                 // Accept either the account's static OTP (e.g. 123456 default) or a
@@ -285,7 +288,19 @@ public class AuthService {
         return buildLoginResponse(user, preferredShopId, null);
     }
 
+    static final String EMPLOYEE_MPIN_ONLY =
+            "EMPLOYEE_MPIN_ONLY: Employees sign in to the Staff App with mobile number and MPIN.";
+
+    /** No legacy (OTP / password / refresh / switch-shop / forgot-password) token for employee roles. */
+    private static void rejectEmployee(User user) {
+        if (com.repairshop.saas.auth.entity.Roles.isEmployee(user.getRole()))
+            throw new com.repairshop.saas.auth.exception.ForbiddenException(EMPLOYEE_MPIN_ONLY);
+    }
+
     private LoginResponse buildLoginResponse(User user, UUID preferredShopId, UUID refreshFamily) {
+        // Single choke point for every legacy token issuance path (login, refresh,
+        // switch-shop, OTP password reset): employees never get a non-MPIN token.
+        rejectEmployee(user);
         // Determine the active shop for JWT shopId claim.
         List<Shop> ownedShops = "SHOP_OWNER".equals(user.getRole())
                 ? shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(user.getId())
@@ -1175,6 +1190,7 @@ public class AuthService {
         boolean isEmail = id.contains("@");
         User user = (isEmail ? userRepository.findByEmail(id) : findUserByEmailOrPhone(id))
                 .orElseThrow(() -> new BadRequestException("No account found for that email or mobile number."));
+        rejectEmployee(user);   // employees never get an OTP (MPIN only), allow-listed or not
 
         java.util.Map<String, Object> res = new java.util.HashMap<>();
         if (isEmail) {
@@ -1218,6 +1234,7 @@ public class AuthService {
         boolean isEmail = id.contains("@");
         User user = (isEmail ? userRepository.findByEmail(id) : findUserByEmailOrPhone(id))
                 .orElseThrow(() -> new BadRequestException("No account found."));
+        rejectEmployee(user);   // employee credentials are owner-managed MPIN only
         boolean ok = isEmail ? otpStore.verify(id, otp.trim()) : OtpPolicy.mobileMatch(id, OtpPolicy.DEFAULT_OTP, otp);
         if (!ok)
             throw new UnauthorizedException("Invalid or expired OTP.");
@@ -1234,6 +1251,7 @@ public class AuthService {
         boolean isEmail = id.contains("@");
         User user = (isEmail ? userRepository.findByEmail(id) : findUserByEmailOrPhone(id)).orElse(null);
         if (user == null || !userId.equals(user.getId())) return false; // only your own account
+        if (com.repairshop.saas.auth.entity.Roles.isEmployee(user.getRole())) return false; // MPIN only, no OTP
         return isEmail ? otpStore.verify(id, otp.trim()) : OtpPolicy.mobileMatch(id, OtpPolicy.DEFAULT_OTP, otp);
     }
 

@@ -39,7 +39,13 @@ public final class Roles {
         return SHOP_OWNER.equals(norm(role));
     }
 
-    /** Back-office staff — may create shop owners. Only admins may (de)activate them. */
+    /** Shop employee roles (Staff App). They sign in ONLY with mobile + owner-set MPIN. */
+    public static boolean isEmployee(String role) {
+        String r = norm(role);
+        return TECHNICIAN.equals(r) || "STAFF".equals(r) || "PICKUP_PERSON".equals(r);
+    }
+
+    /** Back-office staff— may create shop owners. Only admins may (de)activate them. */
     public static boolean isStaff(String role) {
         return isAdmin(role) || isMarketPerson(role);
     }
