@@ -223,4 +223,96 @@ class DeviceSecurityServiceDbTest {
         String t = b(start(ownerLogin(), "dev-a", false).get("accessToken"));
         assertThrows(IllegalStateException.class, () -> noPepper.createPin(t, "MPIN", "482916"));
     }
+
+    // ------------------------------------------------ employee MPIN login
+
+    String empMobile() {
+        String m = "9" + String.valueOf(System.nanoTime()).substring(0, 9);
+        jdbc.update("UPDATE users SET phone = ? WHERE id = ?", "+91 " + m, employee);
+        jdbc.update("UPDATE shops SET owner_user_id = ? WHERE id = ?", owner, shop);
+        return m;
+    }
+
+    Map<String, Object> empMpinLogin(String m, String pin, String dev) {
+        return svc.employeeLogin(m, pin, dev, "Phone " + dev, "android");
+    }
+
+    @Test
+    void ownerSetsEmployeeMpinAndEmployeeLogsInWithoutOtp() {
+        String m = empMobile();
+        assertEquals(false, svc.employeeMpinStatus(b(ownerLogin()), employee).get("mpinSet"));
+        svc.ownerSetEmployeeMpin(b(ownerLogin()), employee, "482916");
+        assertEquals(true, svc.employeeMpinStatus(b(ownerLogin()), employee).get("mpinSet"));
+        String hash = jdbc.queryForObject("SELECT pin_hash FROM auth_pin_credentials WHERE principal_id = ? AND pin_type = 'MPIN'", String.class, employee);
+        assertFalse(hash.contains("482916"));
+        assertTrue(hash.startsWith("$argon2id$"));
+        Map<String, Object> s = empMpinLogin(m, "482916", "dev-a");
+        assertEquals("ACTIVE", s.get("status"));
+        assertEquals(120, s.get("lockTimeoutSeconds"));
+        assertTrue(Instant.parse((String) s.get("otpExpiresAt")).isAfter(Instant.now().plus(Duration.ofDays(300))));   // no 15-day OTP
+        svc.verifyMpin(b(s.get("accessToken")), "482916");                                                              // same MPIN unlocks
+        assertEquals("ACTIVE", empMpinLogin(m, "482916", "dev-a").get("status"));                                     // same device relogin
+    }
+
+    @Test
+    void onlyTheEmployeesOwnerCanSetMpin() {
+        empMobile();
+        UUID other = UUID.randomUUID(), otherShop = UUID.randomUUID();
+        jdbc.update("INSERT INTO shops (id, name, slug) VALUES (?, 'O', ?)", otherShop, "o-" + otherShop);
+        jdbc.update("INSERT INTO users (id, shop_id, email, role, name, is_active) VALUES (?,?,?,?,?,true)", other, otherShop, other + "@t.in", "SHOP_OWNER", "Other");
+        jdbc.update("UPDATE shops SET owner_user_id = ? WHERE id = ?", other, otherShop);
+        String otherToken = b(jwt.generateToken(other, otherShop, other + "@t.in", List.of("SHOP_OWNER"), "OWNER"));
+        assertThrows(ForbiddenException.class, () -> svc.ownerSetEmployeeMpin(otherToken, employee, "482916"));
+        assertThrows(ForbiddenException.class, () -> svc.ownerSetEmployeeMpin(b(empLogin()), employee, "482916"));      // employee itself
+        assertThrows(BadRequestException.class, () -> svc.ownerSetEmployeeMpin(b(ownerLogin()), employee, "111111"));  // too simple
+    }
+
+    @Test
+    void wrongMpinLocksOutAndDisabledAccountsCannotLogIn() {
+        String m = empMobile();
+        svc.ownerSetEmployeeMpin(b(ownerLogin()), employee, "482916");
+        assertThrows(UnauthorizedException.class, () -> empMpinLogin("9000000001", "482916", "dev-a"));                // unknown mobile
+        for (int i = 0; i < 4; i++) assertThrows(UnauthorizedException.class, () -> empMpinLogin(m, "000001", "dev-a"));
+        assertEquals("PIN_LOCKED", assertThrows(UnauthorizedException.class, () -> empMpinLogin(m, "000001", "dev-a")).getMessage());
+        assertThrows(ForbiddenException.class, () -> empMpinLogin(m, "482916", "dev-a"));                                // locked even with right MPIN
+        jdbc.update("UPDATE auth_pin_credentials SET locked_until = NULL, failed_attempts = 0 WHERE principal_id = ?", employee);
+        jdbc.update("UPDATE users SET is_active = false WHERE id = ?", employee);
+        assertThrows(ForbiddenException.class, () -> empMpinLogin(m, "482916", "dev-a"));
+        jdbc.update("UPDATE users SET is_active = true WHERE id = ?", employee);
+        jdbc.update("UPDATE shops SET is_active = false WHERE id = ?", shop);
+        assertThrows(ForbiddenException.class, () -> empMpinLogin(m, "482916", "dev-a"));
+    }
+
+    @Test
+    void newDeviceNeedsOwnerApprovalAndApprovalIsSingleUse() {
+        String m = empMobile();
+        svc.ownerSetEmployeeMpin(b(ownerLogin()), employee, "482916");
+        Map<String, Object> a = empMpinLogin(m, "482916", "dev-a");
+        Map<String, Object> pending = empMpinLogin(m, "482916", "dev-b");
+        assertEquals("DEVICE_APPROVAL_REQUIRED", pending.get("status"));
+        svc.requireSession(b(a.get("accessToken")));                                                   // old device untouched
+        assertEquals(pending.get("requestId"), empMpinLogin(m, "482916", "dev-b").get("requestId"));  // no duplicate requests
+        assertEquals(1, svc.pendingDeviceApprovals(b(ownerLogin())).size());
+        assertEquals("DEVICE_LIMIT", start(empLogin(), "dev-c", true).get("status"));                 // OTP path can't replace either
+        svc.decideDeviceApproval(b(ownerLogin()), (UUID) pending.get("requestId"), true);
+        Map<String, Object> bSess = empMpinLogin(m, "482916", "dev-b");
+        assertEquals("ACTIVE", bSess.get("status"));
+        assertEquals("SESSION_REPLACED", assertThrows(UnauthorizedException.class, () -> svc.requireSession(b(a.get("accessToken")))).getMessage());
+        assertEquals("DEVICE_APPROVAL_REQUIRED", empMpinLogin(m, "482916", "dev-a").get("status"));   // approval was single-use
+    }
+
+    @Test
+    void deniedRequestAndOwnerResetEndSessions() {
+        String m = empMobile();
+        svc.ownerSetEmployeeMpin(b(ownerLogin()), employee, "482916");
+        Map<String, Object> a = empMpinLogin(m, "482916", "dev-a");
+        Map<String, Object> pending = empMpinLogin(m, "482916", "dev-b");
+        svc.decideDeviceApproval(b(ownerLogin()), (UUID) pending.get("requestId"), false);
+        assertThrows(BadRequestException.class, () -> svc.decideDeviceApproval(b(ownerLogin()), (UUID) pending.get("requestId"), true));
+        assertEquals("DEVICE_APPROVAL_REQUIRED", empMpinLogin(m, "482916", "dev-b").get("status"));
+        svc.ownerSetEmployeeMpin(b(ownerLogin()), employee, "593027");                                 // reset
+        assertThrows(UnauthorizedException.class, () -> svc.requireSession(b(a.get("accessToken"))));   // sessions ended
+        assertThrows(UnauthorizedException.class, () -> empMpinLogin(m, "482916", "dev-a"));           // old MPIN dead
+        assertEquals("ACTIVE", empMpinLogin(m, "593027", "dev-b").get("status"));                      // no active device → allowed
+    }
 }

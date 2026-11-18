@@ -28,6 +28,39 @@ public class SecurityController {
         return ResponseEntity.status("DEVICE_LIMIT".equals(res.get("status")) ? HttpStatus.CONFLICT : HttpStatus.OK).body(res);
     }
 
+    /** Employee app login (no OTP). Body: mobile, mpin, deviceId, deviceName, platform. */
+    @PostMapping("/employee/login")
+    public ResponseEntity<Map<String, Object>> employeeLogin(@RequestBody Map<String, Object> b) {
+        Map<String, Object> res = svc.employeeLogin(str(b, "mobile"), str(b, "mpin"), str(b, "deviceId"), str(b, "deviceName"), str(b, "platform"));
+        return ResponseEntity.status("DEVICE_APPROVAL_REQUIRED".equals(res.get("status")) ? HttpStatus.ACCEPTED : HttpStatus.OK).body(res);
+    }
+
+    /** Owner: is the employee's login MPIN set (never returns the MPIN). */
+    @GetMapping("/employees/{employeeId}/mpin")
+    public Map<String, Object> employeeMpinStatus(@RequestHeader(value = AUTH, required = false) String auth, @PathVariable java.util.UUID employeeId) {
+        return svc.employeeMpinStatus(auth, employeeId);
+    }
+
+    /** Owner: set / reset the employee's login MPIN. Body: pin. */
+    @PutMapping("/employees/{employeeId}/mpin")
+    public Map<String, Object> setEmployeeMpin(@RequestHeader(value = AUTH, required = false) String auth, @PathVariable java.util.UUID employeeId,
+                                               @RequestBody Map<String, Object> b) {
+        return svc.ownerSetEmployeeMpin(auth, employeeId, str(b, "pin"));
+    }
+
+    /** Owner: pending employee new-device requests. */
+    @GetMapping("/device-approvals")
+    public java.util.List<Map<String, Object>> deviceApprovals(@RequestHeader(value = AUTH, required = false) String auth) {
+        return svc.pendingDeviceApprovals(auth);
+    }
+
+    /** Owner: approve / deny an employee new-device request. */
+    @PostMapping("/device-approvals/{requestId}/{decision:approve|deny}")
+    public Map<String, Object> decideDeviceApproval(@RequestHeader(value = AUTH, required = false) String auth,
+                                                    @PathVariable java.util.UUID requestId, @PathVariable String decision) {
+        return svc.decideDeviceApproval(auth, requestId, "approve".equals(decision));
+    }
+
     /** Body: refreshToken, accessToken (the expired one). */
     @PostMapping("/session/refresh")
     public Map<String, Object> refresh(@RequestBody Map<String, Object> b) {
