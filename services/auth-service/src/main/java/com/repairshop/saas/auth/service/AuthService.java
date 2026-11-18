@@ -1190,7 +1190,17 @@ public class AuthService {
         boolean isEmail = id.contains("@");
         User user = (isEmail ? userRepository.findByEmail(id) : findUserByEmailOrPhone(id))
                 .orElseThrow(() -> new BadRequestException("No account found for that email or mobile number."));
-        rejectEmployee(user);   // employees never get an OTP (MPIN only), allow-listed or not
+        // Employees never get an OTP (MPIN only), allow-listed or not. Keep the
+        // 200 + loginType contract (no OTP issued, sent=false): the Partner app
+        // reads loginType=EMPLOYEE to fall back to the shop's own login mobile.
+        if (com.repairshop.saas.auth.entity.Roles.isEmployee(user.getRole())) {
+            java.util.Map<String, Object> emp = new java.util.HashMap<>();
+            emp.put("channel", isEmail ? "EMAIL" : "MOBILE");
+            emp.put("sent", false);
+            emp.put("target", isEmail ? maskEmail(id) : maskMobile(id));
+            emp.put("loginType", "EMPLOYEE");
+            return emp;
+        }
 
         java.util.Map<String, Object> res = new java.util.HashMap<>();
         if (isEmail) {

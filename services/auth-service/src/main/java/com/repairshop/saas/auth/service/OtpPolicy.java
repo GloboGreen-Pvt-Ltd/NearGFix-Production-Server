@@ -53,13 +53,34 @@ public class OtpPolicy {
         devMode = dev;
         fixedTestCode = fixedCode;
         java.util.Set<String> set = new java.util.HashSet<>();
-        if (numbers != null) for (String n : numbers.split(",")) { String k = norm(n); if (k != null) set.add(k); }
+        for (String n : splitNumbers(numbers)) { String k = norm(n); if (k != null) set.add(k); }
         testNumbers = java.util.Set.copyOf(set);
         TEST_OTPS.clear();
         TEST_ISSUES.clear();
         if (!set.isEmpty())
-            log.warn("[AUDIT] OTP test numbers ENABLED for {} number(s), fixedCode={}; unset OTP_TEST_NUMBERS after testing",
-                    set.size(), fixedCode);
+            log.warn("[AUDIT] OTP test numbers ENABLED for {} number(s) {}, fixedCode={}; unset OTP_TEST_NUMBERS after testing",
+                    set.size(), set.stream().map(OtpPolicy::mask).sorted().toList(), fixedCode);
+    }
+
+    /**
+     * OTP_TEST_NUMBERS entries may be separated by commas, semicolons, newlines or
+     * plain spaces ("a b c" in an .env / secret used to collapse into ONE bogus
+     * entry, so only the last number worked). A space inside a single number
+     * ("+91 95008 24814") is kept together: whitespace splits only when every
+     * part is itself a full 10+ digit number.
+     */
+    static java.util.List<String> splitNumbers(String numbers) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        if (numbers == null) return out;
+        for (String tok : numbers.replace("\"", "").replace("'", "").split("[,;\\r\\n]+")) {
+            String t = tok.trim();
+            if (t.isEmpty()) continue;
+            String[] parts = t.split("\\s+");
+            boolean allFull = parts.length > 1;
+            for (String p : parts) if (p.replaceAll("\\D", "").length() < 10) { allFull = false; break; }
+            if (allFull) out.addAll(java.util.Arrays.asList(parts)); else out.add(t);
+        }
+        return out;
     }
 
     static String norm(String mobile) {
