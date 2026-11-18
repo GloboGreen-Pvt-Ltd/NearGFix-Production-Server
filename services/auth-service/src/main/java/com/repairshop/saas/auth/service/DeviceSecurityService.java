@@ -108,10 +108,15 @@ public class DeviceSecurityService {
         Principal p = principal(freshOtpClaims(otpLoginToken));
         String devHash = sha256(p.type() + ":" + deviceId);
 
+        // Partner app (owner / shop login): multiple devices allowed (migration 125).
+        // Only THIS device's previous session is considered (re-login replaces it);
+        // other devices stay signed in. Every other app keeps single-device.
+        boolean multiDevice = "PARTNER".equals(p.app());
         List<Map<String, Object>> active = jdbc.queryForList("""
                 SELECT id, device_id_hash, device_name, platform, last_active_at FROM auth_device_sessions
-                 WHERE principal_type = ? AND principal_id = ? AND app_type = ? AND revoked_at IS NULL FOR UPDATE""",
-                p.type(), p.id(), p.app());
+                 WHERE principal_type = ? AND principal_id = ? AND app_type = ? AND revoked_at IS NULL
+                   AND (? = false OR device_id_hash = ?) FOR UPDATE""",
+                p.type(), p.id(), p.app(), multiDevice, devHash);
         if (!active.isEmpty()) {
             Map<String, Object> old = active.get(0);
             boolean sameDevice = devHash.equals(old.get("device_id_hash"));
