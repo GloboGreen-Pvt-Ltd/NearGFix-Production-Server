@@ -349,8 +349,18 @@ public class DeviceSecurityService {
             if (ok == null || ok == 0) throw new ForbiddenException("Employee not found in this shop");
             p = employeePrincipal(empId, p.shopId(), null);
         }
+        // Owner / shop session without employeeId: identify the approver from the PIN
+        // itself (owner, shop or a checked-in employee of THIS shop) — server-side only.
+        boolean auto = (employeeId == null || employeeId.isBlank())
+                && ("SHOP_OWNER".equals(p.type()) || "SHOP_MOBILE".equals(p.type()));
+        Integer autoVersion = null;
+        if (auto) {
+            Object[] m = autoApprover(s, p, action, pin);
+            p = (Principal) m[0];
+            autoVersion = (Integer) m[1];
+        }
         UUID attendanceId = attendanceGate(p, action);
-        int version = checkPin(p, s.id(), "TPIN", pin);
+        int version = auto ? autoVersion : checkPin(p, s.id(), "TPIN", pin);
 
         String secret = randomToken();
         UUID id = UUID.randomUUID();
@@ -370,8 +380,72 @@ public class DeviceSecurityService {
         res.put("authorizationToken", secret);
         res.put("expiresAt", exp.toString());
         res.put("actorType", p.type());
+        res.put("actorId", p.id());
         res.put("actorName", actorName(p));
+        res.put("actorRole", actorRole(p));
         return res;
+    }
+
+    /**
+     * Finds whose TPIN this is among the session shop's owner / shop login and its active
+     * employees. Every candidate is checked server-side (Argon2 + pepper); locked
+     * credentials are skipped. Exactly one match = the approver. Two or more = refused
+     * (never guessed, and who else shares the PIN is never revealed). Because one entry
+     * is tested against several credentials, failures are also limited per SHOP:
+     * 5 failed auto-verifications in 15 min lock TPIN entry for that shop.
+     * Returns {Principal, credential_version}.
+     */
+    private Object[] autoApprover(Session s, Principal caller, String action, String pin) {
+        UUID shopId = caller.shopId();
+        Integer recent = jdbc.queryForObject("""
+                SELECT count(*) FROM auth_security_audit_logs
+                 WHERE shop_id = ? AND event_type = 'TPIN_AUTO_VERIFY' AND result = 'DENIED'
+                   AND created_at > now() - interval '15 minutes'""", Integer.class, shopId);
+        int fails = recent == null ? 0 : recent;
+        if (fails >= MAX_PIN_FAILS) throw new UnauthorizedException("PIN_LOCKED");
+
+        List<Map<String, Object>> cands = pin != null && pin.matches("\\d{6}") ? jdbc.queryForList("""
+                SELECT c.id, c.principal_type, c.principal_id, c.pin_hash, c.credential_version
+                  FROM auth_pin_credentials c JOIN users u ON u.id = c.principal_id
+                 WHERE c.pin_type = 'TPIN' AND c.app_type = 'ANY'
+                   AND (c.locked_until IS NULL OR c.locked_until <= now())
+                   AND ((c.principal_type IN ('SHOP_OWNER','SHOP_MOBILE')
+                         AND (c.principal_id = ? OR c.principal_id = (SELECT owner_user_id FROM shops WHERE id = ?)))
+                     OR (c.principal_type = 'EMPLOYEE' AND u.shop_id = ? AND u.is_active = true
+                         AND upper(u.role) IN ('TECHNICIAN','STAFF','PICKUP_PERSON')))""",
+                caller.id(), shopId, shopId) : List.of();
+        List<Map<String, Object>> hits = new ArrayList<>();
+        for (Map<String, Object> c : cands) {
+            Principal cp = new Principal((String) c.get("principal_type"), (UUID) c.get("principal_id"), "ANY", 15, 120, shopId, null);
+            if (argon.matches(pepper(cp, "TPIN", pin), (String) c.get("pin_hash"))) hits.add(c);
+        }
+        if (hits.size() != 1) {
+            boolean dup = hits.size() > 1;
+            audit(caller, s.id(), "TPIN_AUTO_VERIFY", action, null, null, "DENIED", dup ? "AMBIGUOUS_PIN" : "WRONG_PIN");
+            if (dup) throw new ForbiddenException(   // 403 (not rolled back: the attempt stays counted)
+                    "TPIN_AMBIGUOUS: This TPIN is used by more than one person. Ask the shop owner to reset one of them.");
+            int left = MAX_PIN_FAILS - fails - 1;
+            throw new UnauthorizedException(left <= 0 ? "PIN_LOCKED" : "WRONG_PIN:" + left);
+        }
+        Map<String, Object> c = hits.get(0);
+        String type = (String) c.get("principal_type");
+        UUID id = (UUID) c.get("principal_id");
+        if ("EMPLOYEE".equals(type) && ATTENDANCE_ACTIONS.contains(action))
+            throw new ForbiddenException("Check-in / check-out must be done in the Employee app");
+        Principal approver = "EMPLOYEE".equals(type) ? employeePrincipal(id, shopId, null)
+                : new Principal(type, id, caller.app(), caller.otpDays(), caller.lockSeconds(), shopId, caller.claims());
+        attempt((UUID) c.get("id"), s.id(), true, null);
+        audit(caller, s.id(), "TPIN_AUTO_VERIFY", action, type, id.toString(), "SUCCESS", null);
+        return new Object[]{approver, ((Number) c.get("credential_version")).intValue()};
+    }
+
+    private String actorRole(Principal p) {
+        if ("SHOP_OWNER".equals(p.type())) return "Owner";
+        if ("SHOP_MOBILE".equals(p.type())) return "Shop";
+        if (!"EMPLOYEE".equals(p.type())) return p.type();
+        String r = jdbc.query("SELECT role FROM users WHERE id = ?", rs -> rs.next() ? rs.getString(1) : null, p.id());
+        r = r == null ? "" : r.trim().toUpperCase();
+        return switch (r) { case "STAFF" -> "Staff"; case "PICKUP_PERSON" -> "Pickup Person"; default -> "Technician"; };
     }
 
     /**

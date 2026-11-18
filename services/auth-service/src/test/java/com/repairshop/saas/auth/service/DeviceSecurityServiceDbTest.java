@@ -416,6 +416,89 @@ class DeviceSecurityServiceDbTest {
         assertThrows(ForbiddenException.class, () -> svc.authorizeTransaction(o, "252525", "REPAIR_BOOKING", null, null, "c", null, emp));
     }
 
+    // ------------------------------------------------ automatic TPIN approver (Partner app)
+
+    /** A second active employee of the same shop with their own TPIN; returns their id. */
+    UUID secondEmployee(String tpin) {
+        UUID id = UUID.randomUUID(), t2 = UUID.randomUUID();
+        jdbc.update("INSERT INTO users (id, shop_id, email, role, name, is_active) VALUES (?,?,?,?,?,true)", id, shop, id + "@t.in", "STAFF", "Emp C");
+        jdbc.update("INSERT INTO technicians (id, shop_id, name, user_id) VALUES (?,?,?,?)", t2, shop, "Emp C", id);
+        jdbc.update("INSERT INTO technician_attendance (technician_id, attendance_date, check_in_at, shop_id) VALUES (?, current_date, now(), ?)", t2, shop);
+        String tok = jwt.generateToken(id, shop, id + "@t.in", List.of("STAFF"));
+        svc.createPin(b(start(tok, "c-" + id, false).get("accessToken")), "TPIN", tpin);
+        return id;
+    }
+
+    @Test
+    void autoApproverIdentifiesOwnerOrEmployeeFromPinAlone() {
+        String o = b(start(ownerLogin(), "o-1", false).get("accessToken"));
+        svc.createPin(o, "TPIN", "739154");
+        String e = b(start(empLogin(), "e-1", false).get("accessToken"));
+        svc.createPin(e, "TPIN", "252525");
+
+        Map<String, Object> mine = svc.authorizeTransaction(o, "739154", "REPAIR_BOOKING", "TICKET", "T-1", "c1", null);
+        assertEquals("SHOP_OWNER", mine.get("actorType"));
+        assertEquals("Owner", mine.get("actorRole"));
+        assertEquals("Owner A", mine.get("actorName"));
+
+        // Employee PIN, not checked in → refused (correct PIN, attendance rule).
+        assertEquals("Please check in first to use your TPIN.", assertThrows(ForbiddenException.class,
+                () -> svc.authorizeTransaction(o, "252525", "REPAIR_BOOKING", "TICKET", "T-2", "c2", null)).getMessage());
+        jdbc.update("INSERT INTO technician_attendance (technician_id, attendance_date, check_in_at, shop_id) VALUES (?, current_date, now(), ?)", tech, shop);
+        Map<String, Object> emp = svc.authorizeTransaction(o, "252525", "REPAIR_BOOKING", "TICKET", "T-2", "c2", null);
+        assertEquals("EMPLOYEE", emp.get("actorType"));
+        assertEquals(employee, emp.get("actorId"));
+        assertEquals("Emp B", emp.get("actorName"));
+        assertEquals("Technician", emp.get("actorRole"));
+        assertEquals(employee, svc.consume(o, (String) emp.get("authorizationToken"), "REPAIR_BOOKING", "T-2", "c2").get("actorId"));
+
+        // Employee PIN can't approve attendance actions from the Partner app.
+        assertThrows(ForbiddenException.class, () -> svc.authorizeTransaction(o, "252525", "CHECK_IN", null, null, "c3", null));
+        // Inactive employee's PIN is not a candidate.
+        jdbc.update("UPDATE users SET is_active = false WHERE id = ?", employee);
+        assertThrows(UnauthorizedException.class, () -> svc.authorizeTransaction(o, "252525", "REPAIR_BOOKING", null, null, "c4", null));
+    }
+
+    @Test
+    void autoApproverRefusesSharedPinWithoutRevealingWho() {
+        String o = b(start(ownerLogin(), "o-1", false).get("accessToken"));
+        svc.createPin(o, "TPIN", "739154");
+        String e = b(start(empLogin(), "e-1", false).get("accessToken"));
+        svc.createPin(e, "TPIN", "252525");
+        jdbc.update("INSERT INTO technician_attendance (technician_id, attendance_date, check_in_at, shop_id) VALUES (?, current_date, now(), ?)", tech, shop);
+        secondEmployee("252525");                                                   // same PIN as Emp B
+        ForbiddenException ex = assertThrows(ForbiddenException.class,
+                () -> svc.authorizeTransaction(o, "252525", "REPAIR_BOOKING", null, null, "c1", null));
+        assertTrue(ex.getMessage().startsWith("TPIN_AMBIGUOUS"));
+        assertFalse(ex.getMessage().contains("Emp B") || ex.getMessage().contains("Emp C"));
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM auth_transaction_authorizations WHERE session_id IN (SELECT id FROM auth_device_sessions WHERE principal_id = ?)", Integer.class, owner));
+        assertEquals("SHOP_OWNER", svc.authorizeTransaction(o, "739154", "REPAIR_BOOKING", null, null, "c2", null).get("actorType")); // unique PIN still fine
+    }
+
+    @Test
+    void autoApproverShopWideLockoutAndLockedCredentialsSkipped() {
+        String o = b(start(ownerLogin(), "o-1", false).get("accessToken"));
+        svc.createPin(o, "TPIN", "739154");
+        UUID c = secondEmployee("482916");
+        // A locked credential is never matched.
+        jdbc.update("UPDATE auth_pin_credentials SET locked_until = now() + interval '10 minutes' WHERE principal_id = ? AND pin_type = 'TPIN'", c);
+        assertEquals("WRONG_PIN:4", assertThrows(UnauthorizedException.class,
+                () -> svc.authorizeTransaction(o, "482916", "REPAIR_BOOKING", null, null, "c0", null)).getMessage());
+        jdbc.update("UPDATE auth_pin_credentials SET locked_until = NULL WHERE principal_id = ? AND pin_type = 'TPIN'", c);
+        for (int i = 3; i >= 1; i--) {
+            int left = i;
+            assertEquals("WRONG_PIN:" + left, assertThrows(UnauthorizedException.class,
+                    () -> svc.authorizeTransaction(o, "000001", "REPAIR_BOOKING", null, null, "c" + left, null)).getMessage());
+        }
+        assertEquals("PIN_LOCKED", assertThrows(UnauthorizedException.class,
+                () -> svc.authorizeTransaction(o, "000001", "REPAIR_BOOKING", null, null, "c9", null)).getMessage());
+        // 5 failures for this shop → even a correct PIN is refused for 15 minutes.
+        assertEquals("PIN_LOCKED", assertThrows(UnauthorizedException.class,
+                () -> svc.authorizeTransaction(o, "739154", "REPAIR_BOOKING", null, null, "c10", null)).getMessage());
+        // Wrong guesses never touched individual credentials (no per-person lock as side effect).
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM auth_pin_credentials WHERE principal_id IN (?, ?) AND failed_attempts > 0", Integer.class, owner, c));
+    }
+
     @Test
     void staffAndPickupRolesUseOwnerSetMpinLogin() {
         String m = empMobile();
