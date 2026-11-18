@@ -30,6 +30,10 @@ public class OtpPolicy {
     static final long TEST_ISSUE_WINDOW_MS = 15 * 60 * 1000L;
     private static final java.security.SecureRandom RNG = new java.security.SecureRandom();
     private static volatile java.util.Set<String> testNumbers = java.util.Set.of();
+    // OTP_FIXED_TEST_CODE_ENABLED=true: the issued test OTP for an allow-listed number is
+    // the fixed DEFAULT_OTP instead of a random one. Same single-use / TTL / attempt /
+    // issue-rate limits; numbers outside OTP_TEST_NUMBERS are unaffected.
+    private static volatile boolean fixedTestCode = false;
     private static final java.util.Map<String, TestOtp> TEST_OTPS = new java.util.concurrent.ConcurrentHashMap<>();
     private static final java.util.Map<String, java.util.Deque<Long>> TEST_ISSUES = new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -40,17 +44,22 @@ public class OtpPolicy {
 
     public OtpPolicy(boolean dev) { this(dev, ""); }
 
+    public OtpPolicy(boolean dev, String numbers) { this(dev, numbers, false); }
+
     @org.springframework.beans.factory.annotation.Autowired
     public OtpPolicy(@Value("${app.otp.dev-mode:false}") boolean dev,
-                     @Value("${app.otp.test-numbers:}") String numbers) {
+                     @Value("${app.otp.test-numbers:}") String numbers,
+                     @Value("${app.otp.fixed-test-code-enabled:false}") boolean fixedCode) {
         devMode = dev;
+        fixedTestCode = fixedCode;
         java.util.Set<String> set = new java.util.HashSet<>();
         if (numbers != null) for (String n : numbers.split(",")) { String k = norm(n); if (k != null) set.add(k); }
         testNumbers = java.util.Set.copyOf(set);
         TEST_OTPS.clear();
         TEST_ISSUES.clear();
         if (!set.isEmpty())
-            log.warn("[AUDIT] OTP test numbers ENABLED for {} number(s); unset OTP_TEST_NUMBERS after testing", set.size());
+            log.warn("[AUDIT] OTP test numbers ENABLED for {} number(s), fixedCode={}; unset OTP_TEST_NUMBERS after testing",
+                    set.size(), fixedCode);
     }
 
     static String norm(String mobile) {
@@ -83,7 +92,7 @@ public class OtpPolicy {
             }
             q.addLast(now);
         }
-        String code = String.format("%06d", RNG.nextInt(1_000_000));
+        String code = fixedTestCode ? DEFAULT_OTP : String.format("%06d", RNG.nextInt(1_000_000));
         TEST_OTPS.put(k, new TestOtp(code, now));
         log.warn("[AUDIT] TEST_OTP_ISSUED mobile={} ttlSeconds={}", mask(k), TEST_TTL_MS / 1000);
     }

@@ -180,4 +180,47 @@ class OtpPolicyTest {
         OtpPolicy.devHint(res, "defaultOtp", "123456");
         assertEquals("123456", res.get("defaultOtp"));
     }
+
+    // ---- OTP_FIXED_TEST_CODE_ENABLED (team internal testing) ----------------
+
+    @Test
+    void fixedTestCodeIsAcceptedOnlyForAllowListedNumbersAndOnlyAfterSend() {
+        new OtpPolicy(false, "9000000101, +91 90000 00102", true);
+        String team = "9000000101";
+        // Not issued yet → rejected (no standing universal code).
+        assertThrows(UnauthorizedException.class, () -> OtpPolicy.mobileMatch(team, "123456", "123456"));
+        OtpPolicy.issueTestOtp(team);
+        assertTrue(OtpPolicy.mobileMatch(team, "123456", "123456"));
+        // Single-use: the same code cannot be replayed.
+        assertThrows(UnauthorizedException.class, () -> OtpPolicy.mobileMatch(team, "123456", "123456"));
+        // Normalised allow-list entry (+91 / spaces) works too.
+        OtpPolicy.issueTestOtp("9000000102");
+        assertTrue(OtpPolicy.mobileMatch("+919000000102", null, "123456"));
+        // Any other number: existing process — 123456 is never accepted.
+        OtpPolicy.issueTestOtp(M);
+        assertFalse(OtpPolicy.mobileMatch(M, "123456", "123456"));
+        assertFalse(OtpPolicy.isTestNumber(M));
+    }
+
+    @Test
+    void fixedTestCodeKeepsAttemptAndRateLimits() throws Exception {
+        new OtpPolicy(false, M, true);
+        OtpPolicy.issueTestOtp(M);
+        assertEquals("123456", code());
+        for (int i = 0; i < 9; i++) assertThrows(UnauthorizedException.class, () -> OtpPolicy.mobileMatch(M, null, "000000"));
+        assertThrows(UnauthorizedException.class, () -> OtpPolicy.mobileMatch(M, null, "000000"));   // 10th → locked
+        assertThrows(UnauthorizedException.class, () -> OtpPolicy.mobileMatch(M, null, "123456"));   // locked code dead
+        age(60_000); OtpPolicy.issueTestOtp(M);
+        age(60_000); OtpPolicy.issueTestOtp(M);
+        age(60_000);
+        assertThrows(TooManyRequestsException.class, () -> OtpPolicy.issueTestOtp(M));             // 3 per 15 min
+    }
+
+    @Test
+    void fixedTestCodeDisabledMeansRandomCode() throws Exception {
+        new OtpPolicy(false, M, false);
+        OtpPolicy.issueTestOtp(M);
+        assertTrue(code().matches("\\d{6}"));
+        if (!"123456".equals(code())) assertThrows(UnauthorizedException.class, () -> OtpPolicy.mobileMatch(M, null, "123456"));
+    }
 }
