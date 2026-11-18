@@ -58,6 +58,7 @@ class DeviceSecurityServiceDbTest {
     }
 
     String ownerLogin() { return jwt.generateToken(owner, shop, owner + "@t.in", List.of("SHOP_OWNER"), "OWNER"); }
+    String custLogin() { return jwt.issueCustomerToken(customer, List.of("CUSTOMER")); }
     String empLogin() { return jwt.generateToken(employee, shop, employee + "@t.in", List.of("TECHNICIAN")); }
     static String b(Object t) { return "Bearer " + t; }
 
@@ -66,23 +67,43 @@ class DeviceSecurityServiceDbTest {
     }
 
     @Test
-    void singleDeviceReplacementRevokesOldSession() {
-        Map<String, Object> a = start(ownerLogin(), "dev-a", false);
+    void singleDeviceReplacementRevokesOldSession() {   // CUSTOMER app stays single-device
+        Map<String, Object> a = start(custLogin(), "dev-a", false);
         assertEquals("ACTIVE", a.get("status"));
         assertNotNull(jwt.parseClaims((String) a.get("accessToken")).get("sid"));
-        Map<String, Object> limit = start(ownerLogin(), "dev-b", false);
+        Map<String, Object> limit = start(custLogin(), "dev-b", false);
         assertEquals("DEVICE_LIMIT", limit.get("status"));
         assertEquals("Phone dev-a", limit.get("deviceName"));
         assertEquals("android", limit.get("platform"));
         svc.requireSession(b(a.get("accessToken")));   // showing the limit / Cancel keeps the old device signed in
-        Map<String, Object> bSess = start(ownerLogin(), "dev-b", true);
+        Map<String, Object> bSess = start(custLogin(), "dev-b", true);
         assertEquals("ACTIVE", bSess.get("status"));
         assertEquals("SESSION_REPLACED", assertThrows(UnauthorizedException.class, () -> svc.requireSession(b(a.get("accessToken")))).getMessage());
         assertEquals("SESSION_REPLACED", assertThrows(UnauthorizedException.class, () -> svc.refresh((String) a.get("refreshToken"), (String) a.get("accessToken"))).getMessage());
         svc.requireSession(b(bSess.get("accessToken")));
-        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM auth_device_sessions WHERE principal_id = ? AND revoked_at IS NULL", Integer.class, owner));
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM auth_device_sessions WHERE principal_id = ? AND revoked_at IS NULL", Integer.class, customer));
     }
 
+    @Test
+    void partnerOwnerCanBeSignedInOnSeveralDevices() {
+        Map<String, Object> a = start(ownerLogin(), "dev-a", false);
+        Map<String, Object> bSess = start(ownerLogin(), "dev-b", false);              // no DEVICE_LIMIT
+        assertEquals("ACTIVE", bSess.get("status"));
+        svc.requireSession(b(a.get("accessToken")));                                   // dev-a still signed in
+        svc.requireSession(b(bSess.get("accessToken")));
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM auth_device_sessions WHERE principal_id = ? AND revoked_at IS NULL", Integer.class, owner));
+        Map<String, Object> a2 = start(ownerLogin(), "dev-a", false);                 // same phone re-login replaces only itself
+        assertThrows(UnauthorizedException.class, () -> svc.requireSession(b(a.get("accessToken"))));
+        svc.requireSession(b(a2.get("accessToken")));
+        svc.requireSession(b(bSess.get("accessToken")));
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM auth_device_sessions WHERE principal_id = ? AND revoked_at IS NULL", Integer.class, owner));
+        svc.logout(b(bSess.get("accessToken")));                                       // logout ends only that device
+        assertThrows(UnauthorizedException.class, () -> svc.requireSession(b(bSess.get("accessToken"))));
+        svc.requireSession(b(a2.get("accessToken")));
+        // Employee app is still single-device.
+        start(empLogin(), "e-a", false);
+        assertEquals("DEVICE_LIMIT", start(empLogin(), "e-b", false).get("status"));
+    }
     @Test
     void refreshRotatesAndReuseRevokesSession() {
         Map<String, Object> s = start(ownerLogin(), "dev-a", false);
