@@ -51,6 +51,19 @@ public class AuthController {
     private final JwtService jwtService;
     private final com.repairshop.saas.auth.service.EmployeePinService employeePinService;
     private final com.repairshop.saas.auth.service.BookingPinService bookingPinService;
+    private final com.repairshop.saas.auth.service.DeviceSecurityService deviceSecurity;
+
+    /**
+     * Employee changes their own login MPIN. Body: currentMpin, newMpin. The employee
+     * is taken from the device-session bearer only (never a client userId); all
+     * employee sessions are revoked on success, so the app must log in again.
+     */
+    @PutMapping("/employee/change-mpin")
+    @Operation(summary = "Employee: change own login MPIN (current MPIN required)")
+    public Map<String, Object> changeEmployeeMpin(@RequestHeader(value = "Authorization", required = false) String auth,
+                                                  @RequestBody Map<String, String> body) {
+        return deviceSecurity.changeEmployeeMpin(auth, body.get("currentMpin"), body.get("newMpin"));
+    }
 
     @PostMapping("/login")
     @ResponseStatus(HttpStatus.OK)
