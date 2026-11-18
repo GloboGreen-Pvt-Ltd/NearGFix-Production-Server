@@ -162,7 +162,11 @@ public class RepairDeliveryService {
 
     /** Shop hands the device to the employee who accepted the delivery. */
     @Transactional
-    public Map<String, Object> release(UUID shopId, UUID ticketId) {
+    public Map<String, Object> release(UUID shopId, UUID ticketId) { return release(shopId, ticketId, null); }
+
+    /** approvedBy: server-verified TPIN approver "Name (Role)" — saved in the same transaction as the release. */
+    @Transactional
+    public Map<String, Object> release(UUID shopId, UUID ticketId, String approvedBy) {
         Ticket t = ticket(shopId, ticketId);
         RepairDelivery d = locked(ticketId);
         if (!"ACCEPTED".equals(d.getStatus())) throw conflict("Release the device only after the employee accepts the delivery.");
@@ -170,7 +174,8 @@ public class RepairDeliveryService {
         if (CLOSED_TICKET.contains(upper(t.getStatus()))) throw conflict("This booking is already closed.");
         d.setReleasedAt(Instant.now());
         deliveries.save(d);
-        event(d, "ACCEPTED", "Device released to " + techName(d), null, "SHOP");
+        event(d, "ACCEPTED", "Device released to " + techName(d),
+                approvedBy != null ? "Handed over by " + approvedBy + " · TPIN verified" : null, "SHOP");
         return getForShop(shopId, ticketId);
     }
 
