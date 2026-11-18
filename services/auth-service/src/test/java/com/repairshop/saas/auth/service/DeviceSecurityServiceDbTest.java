@@ -269,6 +269,23 @@ class DeviceSecurityServiceDbTest {
     }
 
     @Test
+    void employeeAppCheckInWithTimeColumnsCountsAsCheckedIn() {
+        String o = b(start(ownerLogin(), "o-1", false).get("accessToken"));
+        String e = b(start(empLogin(), "e-1", false).get("accessToken"));
+        svc.createPin(e, "TPIN", "252525");
+        String today = "(now() AT TIME ZONE 'Asia/Kolkata')::date";
+        // Yesterday's open TIME-only row does not count.
+        jdbc.update("INSERT INTO technician_attendance (technician_id, attendance_date, check_in_time) VALUES (?, " + today + " - 1, '09:00')", tech);
+        assertThrows(ForbiddenException.class, () -> svc.authorizeTransaction(o, "252525", "REPAIR_BOOKING", null, null, "c1", null));
+        // Today's Employee-app check-in (date + check_in_time only) counts.
+        jdbc.update("INSERT INTO technician_attendance (technician_id, attendance_date, check_in_time) VALUES (?, " + today + ", '02:28')", tech);
+        assertEquals(employee, svc.authorizeTransaction(o, "252525", "REPAIR_BOOKING", null, null, "c2", null).get("actorId"));
+        // Checked out → no longer counts.
+        jdbc.update("UPDATE technician_attendance SET check_out_time = '10:00' WHERE technician_id = ?", tech);
+        assertThrows(ForbiddenException.class, () -> svc.authorizeTransaction(o, "252525", "REPAIR_BOOKING", null, null, "c3", null));
+    }
+
+    @Test
     void tpinResetRequiresFreshOtpAndRevokesPendingAuthorizations() {
         String login = ownerLogin();
         String t = b(start(login, "dev-a", false).get("accessToken"));
