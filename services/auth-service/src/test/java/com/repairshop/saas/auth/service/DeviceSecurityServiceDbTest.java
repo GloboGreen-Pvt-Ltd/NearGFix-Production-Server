@@ -84,6 +84,67 @@ class DeviceSecurityServiceDbTest {
         assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM auth_device_sessions WHERE principal_id = ? AND revoked_at IS NULL", Integer.class, customer));
     }
 
+    // ------------------------------------------------ multi-device TESTING allow-list
+
+    @Test
+    void allowListedEmployeeUsesSeveralPhonesWithoutOwnerApproval() {
+        String m = empMobile();
+        svc.ownerSetEmployeeMpin(b(ownerLogin()), employee, "482916");
+        svc.setMultiDeviceTesters("9000000999, " + m);
+        try {
+            Map<String, Object> a = empMpinLogin(m, "482916", "dev-a");
+            Map<String, Object> bS = empMpinLogin(m, "482916", "dev-b");               // no DEVICE_APPROVAL_REQUIRED
+            assertEquals("ACTIVE", bS.get("status"));
+            svc.requireSession(b(a.get("accessToken")));                              // dev-a still signed in
+            svc.requireSession(b(bS.get("accessToken")));
+            assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM auth_device_approvals WHERE employee_id = ?", Integer.class, employee));
+            Map<String, Object> r = svc.refresh((String) bS.get("refreshToken"), (String) bS.get("accessToken"));
+            svc.requireSession(b(r.get("accessToken")));                              // refresh honours the exception
+            Map<String, Object> a2 = empMpinLogin(m, "482916", "dev-a");             // same phone → replaces only itself
+            assertThrows(UnauthorizedException.class, () -> svc.requireSession(b(a.get("accessToken"))));
+            svc.requireSession(b(a2.get("accessToken")));
+            svc.requireSession(b(r.get("accessToken")));
+            assertThrows(UnauthorizedException.class, () -> empMpinLogin(m, "000001", "dev-c")); // MPIN still checked
+            svc.ownerSetEmployeeMpin(b(ownerLogin()), employee, "593027");            // security revocation still ends ALL
+            assertThrows(UnauthorizedException.class, () -> svc.requireSession(b(a2.get("accessToken"))));
+            assertThrows(UnauthorizedException.class, () -> svc.requireSession(b(r.get("accessToken"))));
+        } finally {
+            svc.setMultiDeviceTesters("");
+        }
+    }
+
+    @Test
+    void nonListedEmployeeAndCustomerStaySingleDevice() {
+        String m = empMobile();
+        svc.ownerSetEmployeeMpin(b(ownerLogin()), employee, "482916");
+        svc.setMultiDeviceTesters("9000000999");                                       // someone else is listed
+        try {
+            empMpinLogin(m, "482916", "dev-a");
+            assertEquals("DEVICE_APPROVAL_REQUIRED", empMpinLogin(m, "482916", "dev-b").get("status"));
+            start(custLogin(), "c-a", false);
+            assertEquals("DEVICE_LIMIT", start(custLogin(), "c-b", false).get("status"));
+        } finally {
+            svc.setMultiDeviceTesters("");
+        }
+    }
+
+    @Test
+    void allowListedCustomerUsesSeveralPhonesAndLogoutEndsOnlyOne() {
+        String mobile = jdbc.queryForObject("SELECT mobile FROM customer_users WHERE id = ?", String.class, customer);
+        svc.setMultiDeviceTesters(mobile);
+        try {
+            Map<String, Object> a = start(custLogin(), "c-a", false);
+            Map<String, Object> bS = start(custLogin(), "c-b", false);
+            assertEquals("ACTIVE", bS.get("status"));                                   // no DEVICE_LIMIT
+            svc.requireSession(b(a.get("accessToken")));
+            svc.logout(b(bS.get("accessToken")));                                      // manual logout: only that phone
+            assertThrows(UnauthorizedException.class, () -> svc.requireSession(b(bS.get("accessToken"))));
+            svc.requireSession(b(a.get("accessToken")));
+        } finally {
+            svc.setMultiDeviceTesters("");
+        }
+    }
+
     @Test
     void partnerOwnerCanBeSignedInOnSeveralDevices() {
         Map<String, Object> a = start(ownerLogin(), "dev-a", false);

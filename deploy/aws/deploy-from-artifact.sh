@@ -184,6 +184,7 @@ ensure_env_file() {
   # OTP_DEV_MODE defaults to false; OTP_TEST_NUMBERS empty = test OTP disabled.
   otp_dev_mode="${OTP_DEV_MODE:-$(read_env_value OTP_DEV_MODE)}"; otp_dev_mode="${otp_dev_mode:-false}"
   otp_test_numbers="${OTP_TEST_NUMBERS:-$(read_env_value OTP_TEST_NUMBERS)}"
+  device_limit_test_accounts="${DEVICE_LIMIT_TEST_ACCOUNTS:-$(read_env_value DEVICE_LIMIT_TEST_ACCOUNTS)}"
   otp_fixed_test_code="${OTP_FIXED_TEST_CODE_ENABLED:-$(read_env_value OTP_FIXED_TEST_CODE_ENABLED)}"; otp_fixed_test_code="${otp_fixed_test_code:-false}"
   pin_pepper="${PIN_PEPPER:-$(read_env_value PIN_PEPPER)}"
   tpin_enforced="${TPIN_ENFORCED:-$(read_env_value TPIN_ENFORCED)}"; tpin_enforced="${tpin_enforced:-false}"
@@ -222,6 +223,7 @@ BOTBEE_CHANNEL_ID=$botbee_channel_id
 BOTBEE_WHATSAPP_ENABLED=$botbee_enabled
 OTP_DEV_MODE=$otp_dev_mode
 OTP_TEST_NUMBERS=$otp_test_numbers
+DEVICE_LIMIT_TEST_ACCOUNTS=$device_limit_test_accounts
 OTP_FIXED_TEST_CODE_ENABLED=$otp_fixed_test_code
 PIN_PEPPER=$pin_pepper
 TPIN_ENFORCED=$tpin_enforced
