@@ -95,7 +95,7 @@ public class DeviceSecurityService {
                 UPDATE auth_device_sessions SET last_active_at = now()
                  WHERE id = ? AND principal_type = ? AND principal_id = ? AND revoked_at IS NULL AND otp_expires_at > now()""",
                 UUID.fromString(sid), p.type(), p.id());
-        if (n == 0) throw new UnauthorizedException("SESSION_EXPIRED");
+        if (n == 0) throw new UnauthorizedException(replaced(UUID.fromString(sid)) ? "SESSION_REPLACED" : "SESSION_EXPIRED");
         return new Session(UUID.fromString(sid), p);
     }
 
@@ -109,7 +109,7 @@ public class DeviceSecurityService {
         String devHash = sha256(p.type() + ":" + deviceId);
 
         List<Map<String, Object>> active = jdbc.queryForList("""
-                SELECT id, device_id_hash, device_name, last_active_at FROM auth_device_sessions
+                SELECT id, device_id_hash, device_name, platform, last_active_at FROM auth_device_sessions
                  WHERE principal_type = ? AND principal_id = ? AND app_type = ? AND revoked_at IS NULL FOR UPDATE""",
                 p.type(), p.id(), p.app());
         if (!active.isEmpty()) {
@@ -119,6 +119,7 @@ public class DeviceSecurityService {
                 Map<String, Object> res = new LinkedHashMap<>();
                 res.put("status", "DEVICE_LIMIT");
                 res.put("deviceName", old.get("device_name"));
+                res.put("platform", old.get("platform"));
                 res.put("lastActiveAt", old.get("last_active_at"));
                 return res;
             }
@@ -162,6 +163,7 @@ public class DeviceSecurityService {
         if (rows.isEmpty()) throw new UnauthorizedException("SESSION_EXPIRED");
         Map<String, Object> t = rows.get(0);
         UUID sid = (UUID) t.get("session_id");
+        if (t.get("s_revoked") != null && replaced(sid)) throw new UnauthorizedException("SESSION_REPLACED");
         if (t.get("rotated_at") != null || t.get("revoked_at") != null) {
             if (t.get("s_revoked") == null) revokeSession(sid, "REFRESH_REUSE");
             jdbc.update("""
@@ -400,6 +402,11 @@ public class DeviceSecurityService {
             jdbc.update("UPDATE auth_pin_credentials SET failed_attempts = 0, locked_until = NULL WHERE id = ?", cid);
         attempt(cid, s.id(), true, null);
         return ((Number) c.get("credential_version")).intValue();
+    }
+
+    /** True when the session was ended because the account signed in on another device. */
+    private boolean replaced(UUID sid) {
+        return !jdbc.queryForList("SELECT 1 FROM auth_device_sessions WHERE id = ? AND revoke_reason = 'DEVICE_REPLACED'", sid).isEmpty();
     }
 
     private void revokeSession(UUID sid, String reason) {

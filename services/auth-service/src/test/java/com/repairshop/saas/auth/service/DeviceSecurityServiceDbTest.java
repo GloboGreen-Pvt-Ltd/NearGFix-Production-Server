@@ -73,10 +73,12 @@ class DeviceSecurityServiceDbTest {
         Map<String, Object> limit = start(ownerLogin(), "dev-b", false);
         assertEquals("DEVICE_LIMIT", limit.get("status"));
         assertEquals("Phone dev-a", limit.get("deviceName"));
+        assertEquals("android", limit.get("platform"));
+        svc.requireSession(b(a.get("accessToken")));   // showing the limit / Cancel keeps the old device signed in
         Map<String, Object> bSess = start(ownerLogin(), "dev-b", true);
         assertEquals("ACTIVE", bSess.get("status"));
-        assertThrows(UnauthorizedException.class, () -> svc.requireSession(b(a.get("accessToken"))));
-        assertThrows(UnauthorizedException.class, () -> svc.refresh((String) a.get("refreshToken"), (String) a.get("accessToken")));
+        assertEquals("SESSION_REPLACED", assertThrows(UnauthorizedException.class, () -> svc.requireSession(b(a.get("accessToken")))).getMessage());
+        assertEquals("SESSION_REPLACED", assertThrows(UnauthorizedException.class, () -> svc.refresh((String) a.get("refreshToken"), (String) a.get("accessToken"))).getMessage());
         svc.requireSession(b(bSess.get("accessToken")));
         assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM auth_device_sessions WHERE principal_id = ? AND revoked_at IS NULL", Integer.class, owner));
     }
