@@ -607,9 +607,13 @@ public class DeviceSecurityService {
     /** Employee (TECHNICIAN / STAFF / PICKUP_PERSON) of one of the owner's shops; returns {id, shop_id}. */
     private Map<String, Object> ownedEmployee(UUID ownerId, UUID employeeId) {
         List<Map<String, Object>> rows = jdbc.queryForList("""
-                SELECT u.id, u.shop_id, s.owner_user_id FROM users u JOIN shops s ON s.id = u.shop_id
-                 WHERE u.id = ? AND upper(u.role) IN ('TECHNICIAN','STAFF','PICKUP_PERSON')""", employeeId);
-        if (rows.isEmpty() || !(ownerId.equals(rows.get(0).get("owner_user_id")) || isAdmin(ownerId)))
+                SELECT u.id, u.shop_id, s.owner_user_id,
+                       EXISTS (SELECT 1 FROM users o WHERE o.id = ? AND o.shop_id = u.shop_id
+                                  AND upper(o.role) = 'SHOP_OWNER' AND o.is_active = true) AS same_shop_owner
+                  FROM users u JOIN shops s ON s.id = u.shop_id
+                 WHERE u.id = ? AND upper(u.role) IN ('TECHNICIAN','STAFF','PICKUP_PERSON')""", ownerId, employeeId);
+        if (rows.isEmpty() || !(ownerId.equals(rows.get(0).get("owner_user_id"))
+                || Boolean.TRUE.equals(rows.get(0).get("same_shop_owner")) || isAdmin(ownerId)))
             throw new ForbiddenException("Employee not found in your shops");
         return rows.get(0);
     }
