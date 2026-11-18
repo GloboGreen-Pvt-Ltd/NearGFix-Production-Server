@@ -115,7 +115,8 @@ public class DeviceSecurityService {
         if (!active.isEmpty()) {
             Map<String, Object> old = active.get(0);
             boolean sameDevice = devHash.equals(old.get("device_id_hash"));
-            if (!sameDevice && !replace) {
+            // Employees never replace a trusted device on their own (owner approval via MPIN login).
+            if (!sameDevice && (!replace || "EMPLOYEE".equals(p.type()))) {
                 Map<String, Object> res = new LinkedHashMap<>();
                 res.put("status", "DEVICE_LIMIT");
                 res.put("deviceName", old.get("device_name"));
@@ -374,8 +375,218 @@ public class DeviceSecurityService {
     }
 
     /** Verifies a PIN with lockout; returns credential_version. */
-    private int checkPin(Session s, String type, String pin) {
-        Principal p = s.p();
+    // ------------------------------------------------- employee MPIN login (no OTP)
+
+    private static final Duration EMPLOYEE_SESSION = Duration.ofDays(365);
+    private static final Duration APPROVAL_PENDING_TTL = Duration.ofMinutes(30);
+    private static final Duration APPROVAL_USE_TTL = Duration.ofMinutes(15);
+    private static final String EMP_MOBILE = "right(regexp_replace(coalesce(u.phone,''), '\\D', '', 'g'), 10)";
+
+    private Principal employeePrincipal(UUID id, UUID shopId, Claims c) {
+        return new Principal("EMPLOYEE", id, "EMPLOYEE", 365, 120, shopId, c);
+    }
+
+    /** Shop owner (or admin) behind this token, checked in the DB; returns the owner's user id. */
+    private UUID requireOwner(String bearer) {
+        Claims c = parse(bearer);
+        if (c.get("sid") != null) requireSession(bearer);
+        if ("SHOP".equals(c.get("loginScope", String.class))) throw new ForbiddenException("Only the shop owner can manage employee security");
+        UUID id = UUID.fromString(c.getSubject());
+        List<Map<String, Object>> u = jdbc.queryForList("SELECT role, is_active FROM users WHERE id = ?", id);
+        if (u.isEmpty() || !Boolean.TRUE.equals(u.get(0).get("is_active"))) throw new ForbiddenException("Only the shop owner can manage employee security");
+        String role = String.valueOf(u.get(0).get("role")).toUpperCase();
+        if (!role.equals("SHOP_OWNER") && !com.repairshop.saas.auth.entity.Roles.isAdmin(role))
+            throw new ForbiddenException("Only the shop owner can manage employee security");
+        return id;
+    }
+
+    private boolean isAdmin(UUID userId) {
+        String r = jdbc.query("SELECT role FROM users WHERE id = ?", rs -> rs.next() ? rs.getString(1) : null, userId);
+        return com.repairshop.saas.auth.entity.Roles.isAdmin(r);
+    }
+
+    /** Employee (TECHNICIAN) of one of the owner's shops; returns {id, shop_id}. */
+    private Map<String, Object> ownedEmployee(UUID ownerId, UUID employeeId) {
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT u.id, u.shop_id, s.owner_user_id FROM users u JOIN shops s ON s.id = u.shop_id
+                 WHERE u.id = ? AND upper(u.role) = 'TECHNICIAN'""", employeeId);
+        if (rows.isEmpty() || !(ownerId.equals(rows.get(0).get("owner_user_id")) || isAdmin(ownerId)))
+            throw new ForbiddenException("Employee not found in your shops");
+        return rows.get(0);
+    }
+
+    /**
+     * Owner sets / resets an employee's 6-digit login MPIN (Partner app → Employee profile).
+     * Argon2id + pepper; bumps the credential version, clears lockout and ends the
+     * employee's device sessions so the old MPIN / sessions stop working.
+     */
+    @Transactional
+    public Map<String, Object> ownerSetEmployeeMpin(String ownerBearer, UUID employeeId, String pin) {
+        UUID ownerId = requireOwner(ownerBearer);
+        Map<String, Object> emp = ownedEmployee(ownerId, employeeId);
+        validatePin(pin);
+        Principal p = employeePrincipal(employeeId, (UUID) emp.get("shop_id"), null);
+        String h = hash(p, "MPIN", pin);
+        int n = jdbc.update("""
+                UPDATE auth_pin_credentials SET pin_hash = ?, credential_version = credential_version + 1,
+                       failed_attempts = 0, locked_until = NULL, reset_at = now(), updated_at = now()
+                 WHERE principal_type = 'EMPLOYEE' AND principal_id = ? AND app_type = 'EMPLOYEE' AND pin_type = 'MPIN'""", h, employeeId);
+        if (n == 0)
+            jdbc.update("""
+                    INSERT INTO auth_pin_credentials (principal_type, principal_id, app_type, pin_type, pin_hash)
+                    VALUES ('EMPLOYEE', ?, 'EMPLOYEE', 'MPIN', ?)""", employeeId, h);
+        for (Map<String, Object> s : jdbc.queryForList(
+                "SELECT id FROM auth_device_sessions WHERE principal_type = 'EMPLOYEE' AND principal_id = ? AND revoked_at IS NULL", employeeId))
+            revokeSession((UUID) s.get("id"), "MPIN_RESET");
+        jdbc.update("UPDATE auth_device_approvals SET status = 'EXPIRED' WHERE employee_id = ? AND status IN ('PENDING','APPROVED')", employeeId);
+        audit(p, null, n == 0 ? "MPIN_SETUP_BY_OWNER" : "MPIN_RESET_BY_OWNER", null, "OWNER", ownerId.toString(), "SUCCESS", null);
+        return Map.of("employeeId", employeeId, "mpinSet", true);
+    }
+
+    @Transactional(readOnly = true)
+    public Map<String, Object> employeeMpinStatus(String ownerBearer, UUID employeeId) {
+        ownedEmployee(requireOwner(ownerBearer), employeeId);
+        Integer n = jdbc.queryForObject("""
+                SELECT count(*) FROM auth_pin_credentials
+                 WHERE principal_type = 'EMPLOYEE' AND principal_id = ? AND app_type = 'EMPLOYEE' AND pin_type = 'MPIN'""",
+                Integer.class, employeeId);
+        return Map.of("employeeId", employeeId, "mpinSet", n != null && n > 0);
+    }
+
+    /**
+     * Employee app login: registered mobile + owner-set MPIN (no OTP). First device or the
+     * same device → session. A different device while another is active → owner approval
+     * (DEVICE_APPROVAL_REQUIRED); MPIN alone never replaces a trusted device.
+     */
+    @Transactional(noRollbackFor = {UnauthorizedException.class, ForbiddenException.class})
+    public Map<String, Object> employeeLogin(String mobile, String pin, String deviceId, String deviceName, String platform) {
+        if (deviceId == null || deviceId.isBlank()) throw new BadRequestException("deviceId is required");
+        String m = mobile == null ? "" : mobile.replaceAll("\\D", "");
+        if (m.length() < 10) throw new UnauthorizedException("Invalid mobile number or MPIN");
+        m = m.substring(m.length() - 10);
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT u.id, u.shop_id, u.email, u.name, u.role, u.is_active, s.is_active AS shop_active, s.name AS shop_name
+                  FROM users u LEFT JOIN shops s ON s.id = u.shop_id
+                 WHERE upper(u.role) = 'TECHNICIAN' AND""" + " " + EMP_MOBILE + " = ?", m);
+        if (rows.size() != 1) throw new UnauthorizedException("Invalid mobile number or MPIN");
+        Map<String, Object> u = rows.get(0);
+        UUID empId = (UUID) u.get("id");
+        UUID shopId = (UUID) u.get("shop_id");
+        if (!Boolean.TRUE.equals(u.get("is_active"))) throw new ForbiddenException("Your employee account is disabled. Contact your shop owner.");
+        if (shopId == null || !Boolean.TRUE.equals(u.get("shop_active"))) throw new ForbiddenException("Your shop is inactive. Contact your shop owner.");
+
+        Claims claims = jwt.parseClaims(jwt.generateToken(empId, shopId, (String) u.get("email"), List.of(String.valueOf(u.get("role")))));
+        Principal p = employeePrincipal(empId, shopId, claims);
+        checkPin(p, null, "MPIN", pin);   // lockout + attempt log + audit on failure
+
+        String devHash = sha256(p.type() + ":" + deviceId);
+        List<Map<String, Object>> active = jdbc.queryForList("""
+                SELECT id, device_id_hash, device_name, platform, last_active_at FROM auth_device_sessions
+                 WHERE principal_type = 'EMPLOYEE' AND principal_id = ? AND app_type = 'EMPLOYEE' AND revoked_at IS NULL FOR UPDATE""", empId);
+        if (!active.isEmpty()) {
+            Map<String, Object> old = active.get(0);
+            boolean sameDevice = devHash.equals(old.get("device_id_hash"));
+            if (!sameDevice) {
+                int used = jdbc.update("""
+                        UPDATE auth_device_approvals SET status = 'USED'
+                         WHERE employee_id = ? AND device_id_hash = ? AND status = 'APPROVED' AND expires_at > now()""", empId, devHash);
+                if (used == 0) return approvalRequired(p, devHash, deviceName, platform, old);
+            }
+            revokeSession((UUID) old.get("id"), sameDevice ? "RELOGIN" : "DEVICE_REPLACED");
+            audit(p, (UUID) old.get("id"), sameDevice ? "SESSION_RELOGIN" : "DEVICE_REPLACED", null, null, null, "SUCCESS", "OWNER_APPROVED");
+        }
+
+        Instant now = Instant.now(), deadline = now.plus(EMPLOYEE_SESSION);
+        UUID sid = UUID.randomUUID();
+        try {
+            jdbc.update("""
+                    INSERT INTO auth_device_sessions (id, principal_type, principal_id, app_type, device_id_hash,
+                        device_name, platform, otp_verified_at, otp_expires_at)
+                    VALUES (?,?,?,?,?,?,?,?,?)""",
+                    sid, p.type(), p.id(), p.app(), devHash, trim(deviceName, 150), trim(platform, 20),
+                    Timestamp.from(now), Timestamp.from(deadline));
+        } catch (DuplicateKeyException e) {
+            throw new ConflictException("Another login is in progress. Please retry.");
+        }
+        jdbc.update("UPDATE auth_refresh_tokens SET revoked_at = now() WHERE user_id = ? AND revoked_at IS NULL", empId);
+        String refresh = newRefreshToken(sid, null, deadline);
+        audit(p, sid, "MPIN_LOGIN", null, null, null, "SUCCESS", null);
+
+        Map<String, Object> res = sessionBody(p, sid, deadline);
+        res.put("status", "ACTIVE");
+        res.put("accessToken", jwt.issueSessionAccessToken(claims, sid, Date.from(deadline)));
+        res.put("refreshToken", refresh);
+        // Same profile fields as the /auth/login LoginResponse, so the app stores one session shape.
+        res.put("tokenType", "Bearer");
+        res.put("userId", empId.toString());
+        res.put("shopId", shopId.toString());
+        res.put("shopName", u.get("shop_name"));
+        res.put("email", u.get("email"));
+        res.put("name", u.get("name"));
+        res.put("roles", List.of(String.valueOf(u.get("role"))));
+        res.put("loginScope", "OWNER");
+        res.put("loginType", "EMPLOYEE");
+        res.put("deviceSessionId", sid.toString());
+        return res;
+    }
+
+    private Map<String, Object> approvalRequired(Principal p, String devHash, String deviceName, String platform, Map<String, Object> old) {
+        List<Map<String, Object>> open = jdbc.queryForList("""
+                SELECT id FROM auth_device_approvals WHERE employee_id = ? AND device_id_hash = ? AND status = 'PENDING' AND expires_at > now()""",
+                p.id(), devHash);
+        UUID id;
+        if (!open.isEmpty()) id = (UUID) open.get(0).get("id");
+        else {
+            jdbc.update("UPDATE auth_device_approvals SET status = 'EXPIRED' WHERE employee_id = ? AND device_id_hash = ? AND status IN ('PENDING','APPROVED')", p.id(), devHash);
+            id = UUID.randomUUID();
+            jdbc.update("""
+                    INSERT INTO auth_device_approvals (id, employee_id, shop_id, device_id_hash, device_name, platform, expires_at)
+                    VALUES (?,?,?,?,?,?,?)""", id, p.id(), p.shopId(), devHash, trim(deviceName, 150), trim(platform, 20),
+                    Timestamp.from(Instant.now().plus(APPROVAL_PENDING_TTL)));
+            audit(p, null, "DEVICE_APPROVAL_REQUESTED", null, "DEVICE", id.toString(), "PENDING", null);
+        }
+        Map<String, Object> res = new LinkedHashMap<>();
+        res.put("status", "DEVICE_APPROVAL_REQUIRED");
+        res.put("requestId", id);
+        res.put("deviceName", old.get("device_name"));
+        res.put("platform", old.get("platform"));
+        res.put("lastActiveAt", old.get("last_active_at"));
+        return res;
+    }
+
+    /** Owner: pending new-device requests from employees of the owner's shops. */
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> pendingDeviceApprovals(String ownerBearer) {
+        UUID ownerId = requireOwner(ownerBearer);
+        return jdbc.queryForList("""
+                SELECT a.id, a.employee_id AS "employeeId", u.name AS "employeeName", a.device_name AS "deviceName",
+                       a.platform, a.created_at AS "createdAt", a.expires_at AS "expiresAt"
+                  FROM auth_device_approvals a JOIN users u ON u.id = a.employee_id JOIN shops s ON s.id = u.shop_id
+                 WHERE a.status = 'PENDING' AND a.expires_at > now() AND (s.owner_user_id = ? OR ?)
+                 ORDER BY a.created_at DESC""", ownerId, isAdmin(ownerId));
+    }
+
+    /** Owner approves / denies; an approval is single-use and valid for 15 minutes. */
+    @Transactional
+    public Map<String, Object> decideDeviceApproval(String ownerBearer, UUID requestId, boolean approve) {
+        UUID ownerId = requireOwner(ownerBearer);
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT employee_id, shop_id FROM auth_device_approvals WHERE id = ? AND status = 'PENDING' AND expires_at > now() FOR UPDATE", requestId);
+        if (rows.isEmpty()) throw new BadRequestException("This request has expired or was already handled.");
+        UUID empId = (UUID) rows.get(0).get("employee_id");
+        ownedEmployee(ownerId, empId);
+        jdbc.update("""
+                UPDATE auth_device_approvals SET status = ?, decided_by = ?, decided_at = now(), expires_at = ?
+                 WHERE id = ?""", approve ? "APPROVED" : "DENIED", ownerId,
+                Timestamp.from(Instant.now().plus(APPROVAL_USE_TTL)), requestId);
+        audit(employeePrincipal(empId, (UUID) rows.get(0).get("shop_id"), null), null,
+                approve ? "DEVICE_APPROVED" : "DEVICE_DENIED", null, "OWNER", ownerId.toString(), "SUCCESS", null);
+        return Map.of("requestId", requestId, "status", approve ? "APPROVED" : "DENIED");
+    }
+
+    private int checkPin(Session s, String type, String pin) { return checkPin(s.p(), s.id(), type, pin); }
+
+    private int checkPin(Principal p, UUID sid, String type, String pin) {
         List<Map<String, Object>> rows = jdbc.queryForList("""
                 SELECT id, pin_hash, credential_version, failed_attempts, locked_until FROM auth_pin_credentials
                  WHERE principal_type = ? AND principal_id = ? AND app_type = ? AND pin_type = ? FOR UPDATE""",
@@ -385,7 +596,7 @@ public class DeviceSecurityService {
         UUID cid = (UUID) c.get("id");
         Timestamp locked = (Timestamp) c.get("locked_until");
         if (locked != null && locked.toInstant().isAfter(Instant.now())) {
-            attempt(cid, s.id(), false, "LOCKED");
+            attempt(cid, sid, false, "LOCKED");
             throw new ForbiddenException("PIN_LOCKED until " + locked.toInstant());
         }
         boolean ok = pin != null && pin.matches("\\d{6}") && argon.matches(pepper(p, type, pin), (String) c.get("pin_hash"));
@@ -394,13 +605,13 @@ public class DeviceSecurityService {
             boolean lock = fails >= MAX_PIN_FAILS;
             jdbc.update("UPDATE auth_pin_credentials SET failed_attempts = ?, locked_until = ?, updated_at = now() WHERE id = ?",
                     lock ? 0 : fails, lock ? Timestamp.from(Instant.now().plus(PIN_LOCK)) : null, cid);
-            attempt(cid, s.id(), false, lock ? "LOCKED_OUT" : "WRONG_PIN");
-            audit(p, s.id(), type + "_VERIFY", null, null, null, "DENIED", lock ? "LOCKED_OUT" : "WRONG_PIN");
+            attempt(cid, sid, false, lock ? "LOCKED_OUT" : "WRONG_PIN");
+            audit(p, sid, type + "_VERIFY", null, null, null, "DENIED", lock ? "LOCKED_OUT" : "WRONG_PIN");
             throw new UnauthorizedException(lock ? "PIN_LOCKED" : "WRONG_PIN:" + (MAX_PIN_FAILS - fails));
         }
         if (((Number) c.get("failed_attempts")).intValue() > 0 || locked != null)
             jdbc.update("UPDATE auth_pin_credentials SET failed_attempts = 0, locked_until = NULL WHERE id = ?", cid);
-        attempt(cid, s.id(), true, null);
+        attempt(cid, sid, true, null);
         return ((Number) c.get("credential_version")).intValue();
     }
 
