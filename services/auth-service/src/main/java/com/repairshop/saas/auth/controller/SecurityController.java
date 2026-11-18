@@ -105,8 +105,9 @@ public class SecurityController {
     /** Body: pin, actionType, targetType?, targetId?, contextHash, idempotencyKey?. */
     @PostMapping("/tpin/authorize")
     public Map<String, Object> authorize(@RequestHeader(value = AUTH, required = false) String auth, @RequestBody Map<String, Object> b) {
+        // Optional employeeId: owner / shop login session approving with that employee's own TPIN.
         return svc.authorizeTransaction(auth, str(b, "pin"), str(b, "actionType"), str(b, "targetType"),
-                str(b, "targetId"), str(b, "contextHash"), str(b, "idempotencyKey"));
+                str(b, "targetId"), str(b, "contextHash"), str(b, "idempotencyKey"), str(b, "employeeId"));
     }
 
     /** Called by the executing service with the user's bearer. Body: authorizationToken, actionType, targetId?, contextHash. */

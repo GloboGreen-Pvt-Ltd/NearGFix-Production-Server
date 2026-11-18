@@ -367,6 +367,56 @@ class DeviceSecurityServiceDbTest {
     }
 
     @Test
+    void ownerSessionApprovesWithEmployeesOwnTpin() {
+        // Employee sets their own TPIN in the Employee app.
+        String e = b(start(empLogin(), "e-1", false).get("accessToken"));
+        svc.createPin(e, "TPIN", "252525");
+        String o = b(start(ownerLogin(), "o-1", false).get("accessToken"));
+        String emp = employee.toString();
+
+        // Not checked in → refused (same attendance rule as the Employee app).
+        assertThrows(ForbiddenException.class, () -> svc.authorizeTransaction(o, "252525", "REPAIR_BOOKING", "TICKET", "T-1", "c1", null, emp));
+        jdbc.update("INSERT INTO technician_attendance (technician_id, attendance_date, check_in_at, shop_id) VALUES (?, current_date, now(), ?)", tech, shop);
+
+        // Wrong employee TPIN counts against the EMPLOYEE's lockout, not the owner's.
+        assertEquals("WRONG_PIN:4", assertThrows(UnauthorizedException.class,
+                () -> svc.authorizeTransaction(o, "111112", "REPAIR_BOOKING", "TICKET", "T-1", "c1", null, emp)).getMessage());
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM auth_pin_credentials WHERE principal_id = ? AND failed_attempts > 0", Integer.class, owner));
+
+        Map<String, Object> a = svc.authorizeTransaction(o, "252525", "REPAIR_BOOKING", "TICKET", "T-1", "c1", null, emp);
+        assertEquals("EMPLOYEE", a.get("actorType"));
+        assertEquals("Emp B", a.get("actorName"));
+        Map<String, Object> used = svc.consume(o, (String) a.get("authorizationToken"), "REPAIR_BOOKING", "T-1", "c1");
+        assertEquals(employee, used.get("actorId"));                                        // recorded as who approved
+        assertThrows(ForbiddenException.class, () -> svc.consume(o, (String) a.get("authorizationToken"), "REPAIR_BOOKING", "T-1", "c1"));
+
+        // Bound to the owner session that requested it: another session can't consume it.
+        Map<String, Object> a2 = svc.authorizeTransaction(o, "252525", "REPAIR_BOOKING", "TICKET", "T-2", "c2", null, emp);
+        assertThrows(ForbiddenException.class, () -> svc.consume(e, (String) a2.get("authorizationToken"), "REPAIR_BOOKING", "T-2", "c2"));
+    }
+
+    @Test
+    void employeeTpinOnPartnerIsRestricted() {
+        String e = b(start(empLogin(), "e-1", false).get("accessToken"));
+        svc.createPin(e, "TPIN", "252525");
+        String o = b(start(ownerLogin(), "o-1", false).get("accessToken"));
+        String emp = employee.toString();
+        // Attendance actions stay in the Employee app.
+        assertThrows(ForbiddenException.class, () -> svc.authorizeTransaction(o, "252525", "CHECK_IN", null, null, "c", null, emp));
+        // An employee session can't act for another employee.
+        assertThrows(ForbiddenException.class, () -> svc.authorizeTransaction(e, "252525", "REPAIR_BOOKING", null, null, "c", null, emp));
+        // Employee of another shop / unknown → refused.
+        UUID otherShop = UUID.randomUUID(), stranger = UUID.randomUUID();
+        jdbc.update("INSERT INTO shops (id, name, slug) VALUES (?, 'O', ?)", otherShop, "o-" + otherShop);
+        jdbc.update("INSERT INTO users (id, shop_id, email, role, name, is_active) VALUES (?,?,?,?,?,true)", stranger, otherShop, stranger + "@t.in", "TECHNICIAN", "X");
+        assertThrows(ForbiddenException.class, () -> svc.authorizeTransaction(o, "252525", "REPAIR_BOOKING", null, null, "c", null, stranger.toString()));
+        assertThrows(BadRequestException.class, () -> svc.authorizeTransaction(o, "252525", "REPAIR_BOOKING", null, null, "c", null, "not-a-uuid"));
+        // Inactive employee → refused.
+        jdbc.update("UPDATE users SET is_active = false WHERE id = ?", employee);
+        assertThrows(ForbiddenException.class, () -> svc.authorizeTransaction(o, "252525", "REPAIR_BOOKING", null, null, "c", null, emp));
+    }
+
+    @Test
     void staffAndPickupRolesUseOwnerSetMpinLogin() {
         String m = empMobile();
         for (String role : new String[]{"STAFF", "PICKUP_PERSON"}) {
