@@ -1,0 +1,224 @@
+package com.repairshop.saas.auth.service;
+
+import com.repairshop.saas.auth.exception.BadRequestException;
+import com.repairshop.saas.auth.exception.ConflictException;
+import com.repairshop.saas.auth.exception.ForbiddenException;
+import com.repairshop.saas.auth.exception.UnauthorizedException;
+import com.repairshop.saas.auth.security.JwtService;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import java.sql.Timestamp;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+/**
+ * Integration tests for migration 123 + DeviceSecurityService against a real
+ * PostgreSQL with all migrations applied. Runs only when TEST_PG_URL is set
+ * (e.g. jdbc:postgresql://localhost:55432/ngf); skipped otherwise.
+ */
+class DeviceSecurityServiceDbTest {
+
+    static JdbcTemplate jdbc;
+    static final String SECRET = "test-secret-test-secret-test-secret-0123456789";
+    static final String PEPPER = "test-pepper-test-pepper-test-pepper-0123";
+    JwtService jwt;
+    DeviceSecurityService svc;
+    UUID shop, owner, employee, tech, customer;
+
+    @BeforeAll
+    static void db() {
+        String url = System.getenv("TEST_PG_URL");
+        assumeTrue(url != null && !url.isBlank(), "TEST_PG_URL not set");
+        DriverManagerDataSource ds = new DriverManagerDataSource(url,
+                System.getenv().getOrDefault("TEST_PG_USER", "postgres"), System.getenv().getOrDefault("TEST_PG_PASSWORD", "test"));
+        jdbc = new JdbcTemplate(ds);
+    }
+
+    @BeforeEach
+    void fixtures() {
+        jwt = new JwtService(SECRET, 86_400_000L);
+        svc = new DeviceSecurityService(jdbc, jwt, PEPPER);
+        shop = UUID.randomUUID(); owner = UUID.randomUUID(); employee = UUID.randomUUID();
+        tech = UUID.randomUUID(); customer = UUID.randomUUID();
+        jdbc.update("INSERT INTO shops (id, name, slug) VALUES (?, 'T', ?)", shop, "t-" + shop);
+        jdbc.update("INSERT INTO users (id, shop_id, email, role, name, is_active) VALUES (?,?,?,?,?,true)", owner, shop, owner + "@t.in", "SHOP_OWNER", "Owner A");
+        jdbc.update("INSERT INTO users (id, shop_id, email, role, name, is_active) VALUES (?,?,?,?,?,true)", employee, shop, employee + "@t.in", "TECHNICIAN", "Emp B");
+        jdbc.update("INSERT INTO technicians (id, shop_id, name, user_id) VALUES (?,?,?,?)", tech, shop, "Emp B", employee);
+        jdbc.update("INSERT INTO customer_users (id, full_name, mobile) VALUES (?,?,?)", customer, "Cust C", String.valueOf(System.nanoTime()).substring(0, 10));
+    }
+
+    String ownerLogin() { return jwt.generateToken(owner, shop, owner + "@t.in", List.of("SHOP_OWNER"), "OWNER"); }
+    String empLogin() { return jwt.generateToken(employee, shop, employee + "@t.in", List.of("TECHNICIAN")); }
+    static String b(Object t) { return "Bearer " + t; }
+
+    Map<String, Object> start(String login, String device, boolean replace) {
+        return svc.startSession(login, device, "Phone " + device, "android", null, replace);
+    }
+
+    @Test
+    void singleDeviceReplacementRevokesOldSession() {
+        Map<String, Object> a = start(ownerLogin(), "dev-a", false);
+        assertEquals("ACTIVE", a.get("status"));
+        assertNotNull(jwt.parseClaims((String) a.get("accessToken")).get("sid"));
+        Map<String, Object> limit = start(ownerLogin(), "dev-b", false);
+        assertEquals("DEVICE_LIMIT", limit.get("status"));
+        assertEquals("Phone dev-a", limit.get("deviceName"));
+        Map<String, Object> bSess = start(ownerLogin(), "dev-b", true);
+        assertEquals("ACTIVE", bSess.get("status"));
+        assertThrows(UnauthorizedException.class, () -> svc.requireSession(b(a.get("accessToken"))));
+        assertThrows(UnauthorizedException.class, () -> svc.refresh((String) a.get("refreshToken"), (String) a.get("accessToken")));
+        svc.requireSession(b(bSess.get("accessToken")));
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM auth_device_sessions WHERE principal_id = ? AND revoked_at IS NULL", Integer.class, owner));
+    }
+
+    @Test
+    void refreshRotatesAndReuseRevokesSession() {
+        Map<String, Object> s = start(ownerLogin(), "dev-a", false);
+        Map<String, Object> r1 = svc.refresh((String) s.get("refreshToken"), (String) s.get("accessToken"));
+        assertNotEquals(s.get("refreshToken"), r1.get("refreshToken"));
+        UnauthorizedException reuse = assertThrows(UnauthorizedException.class,
+                () -> svc.refresh((String) s.get("refreshToken"), (String) s.get("accessToken")));
+        assertEquals("SESSION_REVOKED", reuse.getMessage());
+        assertThrows(UnauthorizedException.class, () -> svc.refresh((String) r1.get("refreshToken"), (String) r1.get("accessToken")));
+    }
+
+    @Test
+    void otpDeadlineCapsRefreshAndAccessToken() {
+        Map<String, Object> s = start(ownerLogin(), "dev-a", false);
+        Instant deadline = Instant.parse((String) s.get("otpExpiresAt"));
+        long days = Duration.between(Instant.now(), deadline).toDays();
+        assertTrue(days >= 14 && days <= 15, "partner OTP window is 15 days");
+        jdbc.update("UPDATE auth_device_sessions SET otp_verified_at = now() - interval '16 days', otp_expires_at = now() - interval '1 day' WHERE id = ?",
+                UUID.fromString(String.valueOf(s.get("sessionId"))));
+        assertThrows(UnauthorizedException.class, () -> svc.refresh((String) s.get("refreshToken"), (String) s.get("accessToken")));
+        assertThrows(UnauthorizedException.class, () -> svc.requireSession(b(s.get("accessToken"))));
+    }
+
+    @Test
+    void customerGets30DaysAndNoTpin() {
+        Map<String, Object> s = svc.startSession(jwt.issueCustomerToken(customer, List.of("CUSTOMER")), "c-1", "P", "ios", null, false);
+        long days = Duration.between(Instant.now(), Instant.parse((String) s.get("otpExpiresAt"))).toDays();
+        assertTrue(days >= 29 && days <= 30);
+        assertEquals(600, s.get("lockTimeoutSeconds"));
+        assertThrows(ForbiddenException.class, () -> svc.createPin(b(s.get("accessToken")), "TPIN", "482916"));
+        assertEquals(true, svc.createPin(b(s.get("accessToken")), "MPIN", "482916").get("created"));
+    }
+
+    @Test
+    void otpProofRejectsRefreshMintedAndSessionTokens() {
+        String minted = jwt.withoutOtpProof(this::ownerLogin);
+        assertThrows(UnauthorizedException.class, () -> start(minted, "dev-a", false));
+        Map<String, Object> s = start(ownerLogin(), "dev-a", false);
+        assertThrows(UnauthorizedException.class, () -> start((String) s.get("accessToken"), "dev-b", true));
+    }
+
+    @Test
+    void startRevokesLegacyRefreshTokens() {
+        jdbc.update("INSERT INTO auth_refresh_tokens (id, token_hash, family_id, user_id, login_scope, expires_at) VALUES (?,?,?,?, 'OWNER', now() + interval '90 days')",
+                UUID.randomUUID(), UUID.randomUUID().toString().replace("-", ""), UUID.randomUUID(), owner);
+        start(ownerLogin(), "dev-a", false);
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM auth_refresh_tokens WHERE user_id = ? AND revoked_at IS NULL", Integer.class, owner));
+    }
+
+    @Test
+    void mpinCreateVerifyLockoutAndWeakPins() {
+        String t = b(start(ownerLogin(), "dev-a", false).get("accessToken"));
+        assertThrows(BadRequestException.class, () -> svc.createPin(t, "MPIN", "111111"));
+        assertThrows(BadRequestException.class, () -> svc.createPin(t, "MPIN", "123456"));
+        svc.createPin(t, "MPIN", "482916");
+        assertThrows(ConflictException.class, () -> svc.createPin(t, "MPIN", "593827"));
+        assertEquals(true, svc.verifyMpin(t, "482916").get("verified"));
+        for (int i = 0; i < 4; i++) assertThrows(UnauthorizedException.class, () -> svc.verifyMpin(t, "000001"));
+        UnauthorizedException locked = assertThrows(UnauthorizedException.class, () -> svc.verifyMpin(t, "000001"));
+        assertEquals("PIN_LOCKED", locked.getMessage());
+        assertThrows(ForbiddenException.class, () -> svc.verifyMpin(t, "482916"));
+        String raw = jdbc.queryForObject("SELECT pin_hash FROM auth_pin_credentials WHERE principal_id = ? AND pin_type = 'MPIN'", String.class, owner);
+        assertFalse(raw.contains("482916"));
+        assertTrue(raw.startsWith("$argon2id$"));
+    }
+
+    @Test
+    void employeeTpinNeedsCheckInAndIsSingleUse() {
+        String t = b(start(empLogin(), "e-1", false).get("accessToken"));
+        svc.createPin(t, "TPIN", "739154");
+        ForbiddenException noShift = assertThrows(ForbiddenException.class,
+                () -> svc.authorizeTransaction(t, "739154", "REPAIR_BOOKING", null, null, "ctx", null));
+        assertEquals("Please check in first to use your TPIN.", noShift.getMessage());
+
+        Map<String, Object> in = svc.authorizeTransaction(t, "739154", "CHECK_IN", null, null, "ctx-in", null);
+        assertEquals("Emp B", in.get("actorName"));
+        svc.consume(t, (String) in.get("authorizationToken"), "CHECK_IN", null, "ctx-in");
+        assertThrows(ForbiddenException.class, () -> svc.consume(t, (String) in.get("authorizationToken"), "CHECK_IN", null, "ctx-in"));
+
+        // ticket-service stamps the open punch on check-in
+        jdbc.update("INSERT INTO technician_attendance (technician_id, attendance_date, check_in_at, shop_id) VALUES (?, current_date, now(), ?)", tech, shop);
+        assertThrows(ConflictException.class, () -> svc.authorizeTransaction(t, "739154", "CHECK_IN", null, null, "x", null));
+
+        Map<String, Object> ok = svc.authorizeTransaction(t, "739154", "REPAIR_BOOKING", "TICKET", "T-1", "ctx-1", "idem-1");
+        assertThrows(ForbiddenException.class, () -> svc.consume(t, (String) ok.get("authorizationToken"), "REPAIR_BOOKING", "T-1", "other-ctx"));
+        assertThrows(ForbiddenException.class, () -> svc.consume(t, (String) ok.get("authorizationToken"), "PAYMENT", "T-1", "ctx-1"));
+        svc.consume(t, (String) ok.get("authorizationToken"), "REPAIR_BOOKING", "T-1", "ctx-1");
+        assertThrows(ConflictException.class, () -> svc.authorizeTransaction(t, "739154", "REPAIR_BOOKING", "TICKET", "T-1", "ctx-1", "idem-1"));
+
+        // after check-out no protected employee actions
+        jdbc.update("UPDATE technician_attendance SET check_out_at = now() WHERE technician_id = ?", tech);
+        assertThrows(ForbiddenException.class, () -> svc.authorizeTransaction(t, "739154", "PAYMENT", null, null, "c", null));
+    }
+
+    @Test
+    void staleOpenShiftDoesNotCountAsCheckedIn() {
+        String t = b(start(empLogin(), "e-1", false).get("accessToken"));
+        svc.createPin(t, "TPIN", "739154");
+        jdbc.update("INSERT INTO technician_attendance (technician_id, attendance_date, check_in_at, shop_id) VALUES (?, current_date - 2, now() - interval '30 hours', ?)", tech, shop);
+        assertThrows(ForbiddenException.class, () -> svc.authorizeTransaction(t, "739154", "REPAIR_BOOKING", null, null, "c", null));
+        assertNotNull(svc.authorizeTransaction(t, "739154", "CHECK_IN", null, null, "c", null).get("authorizationToken"));
+    }
+
+    @Test
+    void tpinResetRequiresFreshOtpAndRevokesPendingAuthorizations() {
+        String login = ownerLogin();
+        String t = b(start(login, "dev-a", false).get("accessToken"));
+        svc.createPin(t, "TPIN", "739154");
+        Map<String, Object> pending = svc.authorizeTransaction(t, "739154", "PAYMENT", null, null, "ctx", null);
+        assertThrows(UnauthorizedException.class, () -> svc.resetPin(t, "TPIN", jwt.withoutOtpProof(this::ownerLogin), "846291", "OTP"));
+        String otherUser = jwt.generateToken(employee, shop, "e", List.of("TECHNICIAN"));
+        assertThrows(ForbiddenException.class, () -> svc.resetPin(t, "TPIN", otherUser, "846291", "OTP"));
+        svc.resetPin(t, "TPIN", ownerLogin(), "846291", "OTP");
+        assertThrows(ForbiddenException.class, () -> svc.consume(t, (String) pending.get("authorizationToken"), "PAYMENT", null, "ctx"));
+        assertThrows(UnauthorizedException.class, () -> svc.authorizeTransaction(t, "739154", "PAYMENT", null, null, "ctx", null));
+        assertNotNull(svc.authorizeTransaction(t, "846291", "PAYMENT", null, null, "ctx", null).get("authorizationToken"));
+        assertEquals(2, jdbc.queryForObject("SELECT credential_version FROM auth_pin_credentials WHERE principal_id = ? AND pin_type = 'TPIN'", Integer.class, owner));
+    }
+
+    @Test
+    void logoutRevokesSessionAndAuditNeverStoresSecrets() {
+        Map<String, Object> s = start(ownerLogin(), "dev-a", false);
+        svc.createPin(b(s.get("accessToken")), "MPIN", "482916");
+        svc.logout(b(s.get("accessToken")));
+        assertThrows(UnauthorizedException.class, () -> svc.requireSession(b(s.get("accessToken"))));
+        Integer leaks = jdbc.queryForObject("""
+                SELECT count(*) FROM auth_security_audit_logs WHERE principal_id = ?
+                  AND (coalesce(reason_code,'') LIKE '%482916%' OR coalesce(target_id,'') LIKE '%482916%')""", Integer.class, owner);
+        assertEquals(0, leaks);
+        Timestamp revoked = jdbc.queryForObject("SELECT revoked_at FROM auth_device_sessions WHERE id = ?", Timestamp.class,
+                UUID.fromString(String.valueOf(s.get("sessionId"))));
+        assertNotNull(revoked);
+    }
+
+    @Test
+    void missingPepperFailsClosed() {
+        DeviceSecurityService noPepper = new DeviceSecurityService(jdbc, jwt, "");
+        String t = b(start(ownerLogin(), "dev-a", false).get("accessToken"));
+        assertThrows(IllegalStateException.class, () -> noPepper.createPin(t, "MPIN", "482916"));
+    }
+}

@@ -161,7 +161,7 @@ public class CustomerAuthService {
             throw new UnauthorizedException(AuthService.INACTIVE_ACCOUNT_MESSAGE);
 
         if (usingOtp) {
-            if (user.getOtpCode() == null || !user.getOtpCode().equals(request.getOtp().trim()))
+            if (!OtpPolicy.staticMatch(user.getOtpCode(), request.getOtp()))
                 throw new UnauthorizedException("Invalid OTP");
         } else {
             if (user.getPasswordHash() == null
@@ -263,7 +263,7 @@ public class CustomerAuthService {
             burnSignupAttempt(mobile, true);
             throw new UnauthorizedException("That code has expired. Request a new one.");
         }
-        if (!row.getOtpCode().equals(otp.trim())) {
+        if (!OtpPolicy.staticMatch(row.getOtpCode(), otp)) {
             int used = (row.getAttempts() == null ? 0 : row.getAttempts()) + 1;
             boolean exhausted = used >= SIGNUP_OTP_MAX_ATTEMPTS;
             burnSignupAttempt(mobile, exhausted);
@@ -327,14 +327,14 @@ public class CustomerAuthService {
             res.put("sent", sent);
             res.put("target", maskEmail(id));
             res.put("ttlMinutes", 10);
-            res.put("devOtp", code); // dev convenience; production clients ignore this
+            OtpPolicy.devHint(res, "devOtp", code); // dev mode only
         } else {
             user.setOtpCode(DEFAULT_MOBILE_OTP);
             customerUserRepository.save(user);
             res.put("channel", "MOBILE");
             res.put("sent", true);
             res.put("target", maskMobile(id));
-            res.put("defaultOtp", DEFAULT_MOBILE_OTP);
+            OtpPolicy.devHint(res, "defaultOtp", DEFAULT_MOBILE_OTP);
         }
         res.put("email", isEmail ? id : user.getEmail());
         return res;
@@ -359,7 +359,7 @@ public class CustomerAuthService {
                 ? customerUserRepository.findByEmail(id.toLowerCase())
                 : customerUserRepository.findByMobile(id))
                 .orElseThrow(() -> new BadRequestException("No account found."));
-        if (user.getOtpCode() == null || !user.getOtpCode().equals(otp.trim()))
+        if (!OtpPolicy.staticMatch(user.getOtpCode(), otp))
             throw new UnauthorizedException("Invalid or expired OTP.");
 
         user.setPasswordHash(passwordEncoder.encode(newPassword.trim()));

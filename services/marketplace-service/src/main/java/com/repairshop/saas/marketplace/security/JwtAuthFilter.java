@@ -22,6 +22,9 @@ import java.util.stream.Collectors;
 public class JwtAuthFilter extends OncePerRequestFilter {
 
     private final JwtService jwtService;
+    private final org.springframework.jdbc.core.JdbcTemplate jdbc;
+    @org.springframework.beans.factory.annotation.Value("${app.security.require-device-session:${REQUIRE_DEVICE_SESSION:false}}")
+    private boolean requireDeviceSession;
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
@@ -29,6 +32,12 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         String token = extractToken(request);
         if (StringUtils.hasText(token)) {
             try {
+                // Device sessions (migration 123): revoked / OTP-expired sessions are unauthenticated;
+                // with app.security.require-device-session=true legacy tokens without "sid" are too.
+                Object sid = jwtService.parseClaims(token).get("sid");
+                if (sid == null ? requireDeviceSession : jdbc.queryForList(
+                        "SELECT 1 FROM auth_device_sessions WHERE id = ?::uuid AND revoked_at IS NULL AND otp_expires_at > now()",
+                        sid.toString()).isEmpty()) throw new IllegalStateException("SESSION_REVOKED");
                 UUID userId = jwtService.getUserId(token);
                 UUID shopId = jwtService.getShopId(token); // may be null for customer tokens
                 List<String> roles = jwtService.getRoles(token);

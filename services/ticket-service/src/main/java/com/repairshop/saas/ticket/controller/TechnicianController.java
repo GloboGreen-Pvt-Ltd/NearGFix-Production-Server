@@ -2,6 +2,8 @@ package com.repairshop.saas.ticket.controller;
 
 import com.repairshop.saas.common.subscription.LimitCheck;
 import com.repairshop.saas.ticket.dto.*;
+import com.repairshop.saas.ticket.security.TpinGuard;
+import com.repairshop.saas.ticket.security.TpinInterceptor;
 import com.repairshop.saas.ticket.service.TechnicianService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
@@ -26,6 +28,7 @@ import java.util.UUID;
 public class TechnicianController {
 
     private final TechnicianService technicianService;
+    private final TpinGuard tpinGuard;
 
     private UUID shopIdFrom(HttpServletRequest request) {
         String sid = (String) request.getAttribute("shopId");
@@ -127,7 +130,8 @@ public class TechnicianController {
         return technicianService.recordCheckIn(shopId, userId,
                 body != null ? body.getNotes() : null,
                 body != null ? body.getLatitude() : null,
-                body != null ? body.getLongitude() : null);
+                body != null ? body.getLongitude() : null,
+                () -> tpinGuard.consume(request, "CHECK_IN", null, TpinInterceptor.sha256("POST " + request.getRequestURI())));
     }
 
     @PostMapping("/me/attendance/check-out")
@@ -141,7 +145,8 @@ public class TechnicianController {
         return technicianService.recordCheckOut(shopId, userId,
                 body != null ? body.getNotes() : null,
                 body != null ? body.getLatitude() : null,
-                body != null ? body.getLongitude() : null);
+                body != null ? body.getLongitude() : null,
+                () -> tpinGuard.consume(request, "CHECK_OUT", null, TpinInterceptor.sha256("POST " + request.getRequestURI())));
     }
 
     @GetMapping("/me/attendance/today")

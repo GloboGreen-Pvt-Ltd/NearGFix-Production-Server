@@ -47,6 +47,7 @@ public class JwtService {
                 .signWith(key);
         if (shopId != null) builder.claim("shopId", shopId.toString());
         if (loginScope != null && !loginScope.isBlank()) builder.claim("loginScope", loginScope);
+        if (Boolean.TRUE.equals(NO_OTP_PROOF.get())) builder.claim("np", true);
         return builder.compact();
     }
 
@@ -64,6 +65,31 @@ public class JwtService {
                 .expiration(expiry)
                 .signWith(key)
                 .compact();
+    }
+
+    /**
+     * Short-lived (15 min) access token bound to a device session ("sid"),
+     * never outliving the session's OTP deadline. Copies identity claims from base.
+     */
+    public String issueSessionAccessToken(Claims base, UUID sessionId, Date otpDeadline) {
+        Date now = new Date();
+        Date expiry = new Date(Math.min(now.getTime() + 15 * 60 * 1000L, otpDeadline.getTime()));
+        var builder = Jwts.builder().subject(base.getSubject()).issuedAt(now).expiration(expiry)
+                .claim("sid", sessionId.toString()).signWith(key);
+        for (String c : List.of("email", "roles", "shopId", "loginScope"))
+            if (base.get(c) != null) builder.claim(c, base.get(c));
+        return builder.compact();
+    }
+
+    /**
+     * Tokens minted without a fresh OTP (refresh rotation, shop switch) carry
+     * "np" so they can never serve as OTP proof for device-session start / PIN reset.
+     */
+    private static final ThreadLocal<Boolean> NO_OTP_PROOF = new ThreadLocal<>();
+
+    public <T> T withoutOtpProof(java.util.function.Supplier<T> action) {
+        NO_OTP_PROOF.set(Boolean.TRUE);
+        try { return action.get(); } finally { NO_OTP_PROOF.remove(); }
     }
 
     public Claims parseClaims(String token) {

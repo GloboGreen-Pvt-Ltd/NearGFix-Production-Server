@@ -11,5 +11,9 @@ spring:
 server:
   port: ${PORT:8092}
 app:
+  security:
+    # One-time TPIN (X-TPIN-Authorization) on protected routes / attendance (migration 123).
+    tpin-enforced: ${TPIN_ENFORCED:false}
+    tpin-routes: ${TPIN_ROUTES:POST /repair-bookings/*/confirm-order=REPAIR_BOOKING, POST /sell-orders/shop-purchases/*/receive=PICKUP_DELIVERY, POST /sell-orders/shop-purchases/*/price/confirm=SELL_CONFIRM, POST /sell-orders/shop-purchases/*/payout=PAYMENT, POST /sell-orders/shop-purchases/*/complete=SELL_CONFIRM}
   jwt:
     secret: ${JWT_SECRET:your-256-bit-secret-key-for-repair-shop-saas-jwt-signing}

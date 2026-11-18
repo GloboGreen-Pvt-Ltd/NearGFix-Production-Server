@@ -1,5 +1,6 @@
 package com.repairshop.saas.auth.controller;
 
+import com.repairshop.saas.auth.service.OtpPolicy;
 import com.repairshop.saas.auth.dto.CreateShopOwnerRequest;
 import com.repairshop.saas.auth.dto.CreateShopRequest;
 import com.repairshop.saas.auth.dto.CustomerAuthResponse;
@@ -62,7 +63,7 @@ public class AuthController {
     @ResponseStatus(HttpStatus.OK)
     @Operation(summary = "Refresh session", description = "Exchanges a refresh token for a new access token and a rotated refresh token")
     public LoginResponse refresh(@RequestBody(required = false) Map<String, String> body) {
-        return authService.refresh(body == null ? null : body.get("refreshToken"));
+        return jwtService.withoutOtpProof(() -> authService.refresh(body == null ? null : body.get("refreshToken")));
     }
 
     @PostMapping("/logout")
@@ -169,7 +170,7 @@ public class AuthController {
         UUID shopId;
         try { shopId = UUID.fromString(shopIdStr); }
         catch (IllegalArgumentException e) { throw new UnauthorizedException("Invalid shopId"); }
-        return authService.switchShop(userId, shopId, body.get("refreshToken"));
+        return jwtService.withoutOtpProof(() -> authService.switchShop(userId, shopId, body.get("refreshToken")));
     }
 
     @PostMapping("/shop-login")
@@ -189,7 +190,9 @@ public class AuthController {
         if (mobile == null || mobile.isBlank())
             throw new UnauthorizedException("mobile is required");
         String code = authService.issueShopMobileOtp(mobile);
-        return Map.of("sent", true, "devOtp", code, "ttlMinutes", 10);
+        Map<String, Object> res = new java.util.HashMap<>(Map.of("sent", true, "ttlMinutes", 10));
+        OtpPolicy.devHint(res, "devOtp", code);
+        return res;
     }
 
     @PatchMapping("/shop-owners/{ownerId}/locations/{shopId}/mobile-password")
@@ -374,7 +377,9 @@ public class AuthController {
         String email = body == null ? null : body.get("email");
         String code = authService.sendEmailVerifyOtp(email);
         // Dev convenience: surface the code so the admin can complete the flow without an email server.
-        return Map.of("sent", true, "devOtp", code, "ttlMinutes", 10);
+        Map<String, Object> res = new java.util.HashMap<>(Map.of("sent", true, "ttlMinutes", 10));
+        OtpPolicy.devHint(res, "devOtp", code);
+        return res;
     }
 
     @PostMapping("/email-verify/confirm")
