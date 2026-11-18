@@ -315,14 +315,42 @@ public class DeviceSecurityService {
     @Transactional(noRollbackFor = {UnauthorizedException.class, ForbiddenException.class})
     public Map<String, Object> authorizeTransaction(String bearer, String pin, String actionType, String targetType,
                                                     String targetId, String contextHash, String idempotencyKey) {
+        return authorizeTransaction(bearer, pin, actionType, targetType, targetId, contextHash, idempotencyKey, null);
+    }
+
+    /**
+     * With {@code employeeId}: an owner / shop-login session (Partner app) lets one of
+     * the shop's employees approve with the EMPLOYEE'S OWN TPIN (they don't know the
+     * owner's / shop's). The employee must be an active employee of this session's shop
+     * and checked in; the employee's TPIN lockout applies. CHECK_IN / CHECK_OUT stay
+     * Employee-app only. The authorization stays bound to this session; its actor is
+     * the employee (recorded as who approved).
+     */
+    @Transactional(noRollbackFor = {UnauthorizedException.class, ForbiddenException.class})
+    public Map<String, Object> authorizeTransaction(String bearer, String pin, String actionType, String targetType,
+                                                    String targetId, String contextHash, String idempotencyKey,
+                                                    String employeeId) {
         Session s = requireSession(bearer);
         Principal p = s.p();
         if (!tpinAllowed(p)) throw new ForbiddenException("TPIN is not available for this account");
         if (p.shopId() == null) throw new ForbiddenException("No shop on this session");
         String action = req(actionType, "actionType").toUpperCase();
         String ctx = req(contextHash, "contextHash");
+        if (employeeId != null && !employeeId.isBlank()) {
+            if (!"SHOP_OWNER".equals(p.type()) && !"SHOP_MOBILE".equals(p.type()))
+                throw new ForbiddenException("Only the shop owner / shop login can use an employee's TPIN");
+            if (ATTENDANCE_ACTIONS.contains(action))
+                throw new ForbiddenException("Check-in / check-out must be done in the Employee app");
+            UUID empId;
+            try { empId = UUID.fromString(employeeId.trim()); } catch (IllegalArgumentException e) { throw new BadRequestException("Invalid employeeId"); }
+            Integer ok = jdbc.queryForObject("""
+                    SELECT count(*) FROM users WHERE id = ? AND shop_id = ? AND is_active = true
+                       AND upper(role) IN ('TECHNICIAN','STAFF','PICKUP_PERSON')""", Integer.class, empId, p.shopId());
+            if (ok == null || ok == 0) throw new ForbiddenException("Employee not found in this shop");
+            p = employeePrincipal(empId, p.shopId(), null);
+        }
         UUID attendanceId = attendanceGate(p, action);
-        int version = checkPin(s, "TPIN", pin);
+        int version = checkPin(p, s.id(), "TPIN", pin);
 
         String secret = randomToken();
         UUID id = UUID.randomUUID();
@@ -359,14 +387,16 @@ public class DeviceSecurityService {
         if (!ATTENDANCE_ACTIONS.contains(action)) attendanceGate(s.p(), action);
         List<Map<String, Object>> rows = jdbc.queryForList("""
                 UPDATE auth_transaction_authorizations a SET consumed_at = now()
-                 WHERE a.auth_token_hash = ? AND a.session_id = ? AND a.actor_id = ? AND a.action_type = ?
+                 WHERE a.auth_token_hash = ? AND a.session_id = ?
+                   AND (a.actor_id = ? OR (a.actor_type = 'EMPLOYEE' AND ? IN ('SHOP_OWNER','SHOP_MOBILE')))
+                   AND a.action_type = ?
                    AND a.context_hash = ? AND a.target_id IS NOT DISTINCT FROM ?
                    AND a.consumed_at IS NULL AND a.revoked_at IS NULL AND a.expires_at > now()
                    AND a.credential_version = (SELECT c.credential_version FROM auth_pin_credentials c
                         WHERE c.principal_type = a.actor_type AND c.principal_id = a.actor_id AND c.pin_type = 'TPIN'
                         ORDER BY c.updated_at DESC LIMIT 1)
-                RETURNING a.id, a.shop_id, a.attendance_id""",
-                sha256(req(authorizationToken, "authorizationToken")), s.id(), s.p().id(), action,
+                RETURNING a.id, a.shop_id, a.attendance_id, a.actor_type, a.actor_id""",
+                sha256(req(authorizationToken, "authorizationToken")), s.id(), s.p().id(), s.p().type(), action,
                 req(contextHash, "contextHash"), targetId);
         if (rows.isEmpty()) {
             audit(s.p(), s.id(), "TPIN_CONSUME", action, null, targetId, "DENIED", "INVALID_OR_USED");
@@ -378,8 +408,9 @@ public class DeviceSecurityService {
         res.put("authorizationId", r.get("id"));
         res.put("shopId", r.get("shop_id"));
         res.put("attendanceId", r.get("attendance_id"));
-        res.put("actorType", s.p().type());
-        res.put("actorId", s.p().id());
+        // Who approved: the session holder, or the employee whose TPIN was used.
+        res.put("actorType", r.get("actor_type"));
+        res.put("actorId", r.get("actor_id"));
         return res;
     }
 
