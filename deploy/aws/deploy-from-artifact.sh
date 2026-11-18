@@ -179,6 +179,15 @@ ensure_env_file() {
   botbee_enabled="${botbee_enabled:-false}"
   [[ "$(read_env_value BOTBEE_WHATSAPP_ENABLED)" == "false" ]] && botbee_enabled=false
 
+  # Auth security settings: the workflow's value when it passes one, else the
+  # value already on the host (so a manual edit survives redeploys).
+  # OTP_DEV_MODE defaults to false; OTP_TEST_NUMBERS empty = test OTP disabled.
+  otp_dev_mode="${OTP_DEV_MODE:-$(read_env_value OTP_DEV_MODE)}"; otp_dev_mode="${otp_dev_mode:-false}"
+  otp_test_numbers="${OTP_TEST_NUMBERS:-$(read_env_value OTP_TEST_NUMBERS)}"
+  pin_pepper="${PIN_PEPPER:-$(read_env_value PIN_PEPPER)}"
+  tpin_enforced="${TPIN_ENFORCED:-$(read_env_value TPIN_ENFORCED)}"; tpin_enforced="${tpin_enforced:-false}"
+  require_device_session="${REQUIRE_DEVICE_SESSION:-$(read_env_value REQUIRE_DEVICE_SESSION)}"; require_device_session="${require_device_session:-false}"
+
   sudo tee "$APP_DIR/.env" >/dev/null <<EOF
 DB_HOST=$RDS_DB_HOST
 DB_PORT=$RDS_DB_PORT
@@ -210,6 +219,11 @@ BOTBEE_API_KEY=$botbee_api_key
 BOTBEE_BASE_URL=$botbee_base_url
 BOTBEE_CHANNEL_ID=$botbee_channel_id
 BOTBEE_WHATSAPP_ENABLED=$botbee_enabled
+OTP_DEV_MODE=$otp_dev_mode
+OTP_TEST_NUMBERS=$otp_test_numbers
+PIN_PEPPER=$pin_pepper
+TPIN_ENFORCED=$tpin_enforced
+REQUIRE_DEVICE_SESSION=$require_device_session
 JAVA_OPTS="-Xms64m -Xmx160m"
 SERVICES="$SERVICES_DEFAULT"
 EOF
