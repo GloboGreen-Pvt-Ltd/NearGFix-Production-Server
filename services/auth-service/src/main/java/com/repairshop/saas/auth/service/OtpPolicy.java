@@ -17,29 +17,38 @@ public class OtpPolicy {
 
     // ---- Administrator-controlled test numbers (OTP_TEST_NUMBERS) -------------
     // Only numbers listed in OTP_TEST_NUMBERS get a random, single-use, 5-minute
-    // OTP written to the server audit log (never to an API response). Unset the
-    // variable to disable. No universal code and no bypass for any other number.
+    // OTP (never in an API response). The code itself is written to the server log
+    // only while OTP_TEST_LOG_CODES=true (default false) - enable it briefly for a
+    // test session, then turn it off. Unset OTP_TEST_NUMBERS to disable entirely.
+    // No universal code and no bypass for any other number.
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(OtpPolicy.class);
     static final long TEST_TTL_MS = 5 * 60 * 1000L;
-    static final int TEST_MAX_ATTEMPTS = 5;
+    static final int TEST_MAX_ATTEMPTS = 10;
+    /** A repeat send within this window reuses the live code (double taps, owner+shop lookups). */
+    static final long TEST_REUSE_MS = 30 * 1000L;
     static final int TEST_MAX_ISSUES = 3;
     static final long TEST_ISSUE_WINDOW_MS = 15 * 60 * 1000L;
     private static final java.security.SecureRandom RNG = new java.security.SecureRandom();
     private static volatile java.util.Set<String> testNumbers = java.util.Set.of();
+    private static volatile boolean logCodes = false;
     private static final java.util.Map<String, TestOtp> TEST_OTPS = new java.util.concurrent.ConcurrentHashMap<>();
     private static final java.util.Map<String, java.util.Deque<Long>> TEST_ISSUES = new java.util.concurrent.ConcurrentHashMap<>();
 
     private static final class TestOtp {
-        final String code; final long exp; int attempts;
-        TestOtp(String code, long exp) { this.code = code; this.exp = exp; }
+        final String code; final long issued; final long exp; int attempts; boolean used;
+        TestOtp(String code, long issued) { this.code = code; this.issued = issued; this.exp = issued + TEST_TTL_MS; }
     }
 
-    public OtpPolicy(boolean dev) { this(dev, ""); }
+    public OtpPolicy(boolean dev) { this(dev, "", false); }
+
+    public OtpPolicy(boolean dev, String numbers) { this(dev, numbers, false); }
 
     @org.springframework.beans.factory.annotation.Autowired
     public OtpPolicy(@Value("${app.otp.dev-mode:false}") boolean dev,
-                     @Value("${app.otp.test-numbers:}") String numbers) {
+                     @Value("${app.otp.test-numbers:}") String numbers,
+                     @Value("${app.otp.test-log-codes:false}") boolean logTestCodes) {
         devMode = dev;
+        logCodes = logTestCodes;
         java.util.Set<String> set = new java.util.HashSet<>();
         if (numbers != null) for (String n : numbers.split(",")) { String k = norm(n); if (k != null) set.add(k); }
         testNumbers = java.util.Set.copyOf(set);
@@ -62,47 +71,64 @@ public class OtpPolicy {
         return k != null && testNumbers.contains(k);
     }
 
-    /** Issues a test OTP for an allow-listed number (no-op otherwise); the code goes to the audit log only. */
+    /** Issues a test OTP for an allow-listed number (no-op otherwise). 3 per 15 min → 429 with Retry-After. */
     public static void issueTestOtp(String mobile) {
         if (!isTestNumber(mobile)) return;
         String k = norm(mobile);
         long now = System.currentTimeMillis();
+        TestOtp live = TEST_OTPS.get(k);
+        if (live != null && !live.used && live.attempts == 0 && now - live.issued < TEST_REUSE_MS) return; // duplicate send
         java.util.Deque<Long> q = TEST_ISSUES.computeIfAbsent(k, x -> new java.util.ArrayDeque<>());
         synchronized (q) {
-            while (!q.isEmpty() && now - q.peekFirst() > TEST_ISSUE_WINDOW_MS) q.pollFirst();
+            while (!q.isEmpty() && now - q.peekFirst() >= TEST_ISSUE_WINDOW_MS) q.pollFirst();
             if (q.size() >= TEST_MAX_ISSUES) {
-                log.warn("[AUDIT] TEST_OTP_RATE_LIMITED mobile={}", mask(k));
-                throw new com.repairshop.saas.auth.exception.UnauthorizedException("Too many OTP requests. Try again later.");
+                long retry = (q.peekFirst() + TEST_ISSUE_WINDOW_MS - now + 999) / 1000;
+                log.warn("[AUDIT] TEST_OTP_RATE_LIMITED mobile={} retryAfterSeconds={}", mask(k), retry);
+                throw new com.repairshop.saas.auth.exception.TooManyRequestsException("Too many OTP requests. Try again later.", retry);
             }
             q.addLast(now);
         }
         String code = String.format("%06d", RNG.nextInt(1_000_000));
-        TEST_OTPS.put(k, new TestOtp(code, now + TEST_TTL_MS));
-        log.warn("[AUDIT] TEST_OTP_ISSUED mobile={} code={} ttlSeconds={}", mask(k), code, TEST_TTL_MS / 1000);
+        TEST_OTPS.put(k, new TestOtp(code, now));
+        if (logCodes) log.warn("[AUDIT] TEST_OTP_ISSUED mobile={} code={} ttlSeconds={}", mask(k), code, TEST_TTL_MS / 1000);
+        else log.info("[AUDIT] TEST_OTP_ISSUED mobile={} ttlSeconds={}", mask(k), TEST_TTL_MS / 1000);
     }
 
-    /** Single-use check of an issued test OTP; burns it on expiry or after too many wrong attempts. */
+    private static com.repairshop.saas.auth.exception.UnauthorizedException otpError(String msg) {
+        return new com.repairshop.saas.auth.exception.UnauthorizedException(msg);
+    }
+
+    /**
+     * Single-use check of an issued test OTP (allow-listed numbers only; false otherwise).
+     * Wrong / expired / used codes throw 401 with a specific message; the 10th wrong
+     * attempt invalidates the code.
+     */
     public static boolean verifyTestOtp(String mobile, String entered) {
         if (entered == null || !isTestNumber(mobile)) return false;
         String k = norm(mobile);
         TestOtp t = TEST_OTPS.get(k);
-        if (t == null) return false;
+        if (t == null) throw otpError("OTP expired or not requested. Please request a new OTP.");
         synchronized (t) {
+            if (t.used) throw otpError("This OTP has already been used. Please request a new OTP.");
             if (System.currentTimeMillis() > t.exp) {
                 TEST_OTPS.remove(k, t);
                 log.warn("[AUDIT] TEST_OTP_EXPIRED mobile={}", mask(k));
-                return false;
+                throw otpError("OTP expired. Please request a new OTP.");
             }
+            if (t.attempts >= TEST_MAX_ATTEMPTS) throw otpError("Too many incorrect attempts. Please request a new OTP.");
             if (java.security.MessageDigest.isEqual(t.code.getBytes(), entered.trim().getBytes())) {
-                if (!TEST_OTPS.remove(k, t)) return false;   // already used
+                t.used = true;
                 log.warn("[AUDIT] TEST_OTP_USED mobile={}", mask(k));
                 return true;
             }
-            if (++t.attempts >= TEST_MAX_ATTEMPTS) {
+            int left = TEST_MAX_ATTEMPTS - (++t.attempts);
+            if (left <= 0) {
                 TEST_OTPS.remove(k, t);
                 log.warn("[AUDIT] TEST_OTP_LOCKED mobile={}", mask(k));
-            } else log.warn("[AUDIT] TEST_OTP_MISMATCH mobile={} attempts={}", mask(k), t.attempts);
-            return false;
+                throw otpError("Too many incorrect attempts. Please request a new OTP.");
+            }
+            log.warn("[AUDIT] TEST_OTP_MISMATCH mobile={} attempts={}", mask(k), t.attempts);
+            throw otpError("Incorrect OTP. " + left + (left == 1 ? " attempt" : " attempts") + " left.");
         }
     }
 
