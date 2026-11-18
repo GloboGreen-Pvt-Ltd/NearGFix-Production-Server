@@ -217,6 +217,19 @@ class OtpPolicyTest {
     }
 
     @Test
+    void testNumbersParseWithAnySeparator() {
+        String[] six = {"9000000101", "9000000102", "9000000103", "9000000104", "9000000105", "9000000106"};
+        for (String raw : new String[]{
+                String.join(",", six), String.join(", ", six), String.join(" ", six), String.join("\n", six),
+                String.join(";", six), "\"" + String.join(",", six) + "\"",
+                "+91 90000 00101, +919000000102 9000000103,9000000104;\n9000000105  9000000106"}) {
+            new OtpPolicy(false, raw, true);
+            for (String n : six) assertTrue(OtpPolicy.isTestNumber(n), n + " in [" + raw + "]");
+            assertFalse(OtpPolicy.isTestNumber(M), raw);
+        }
+    }
+
+    @Test
     void fixedTestCodeDisabledMeansRandomCode() throws Exception {
         new OtpPolicy(false, M, false);
         OtpPolicy.issueTestOtp(M);

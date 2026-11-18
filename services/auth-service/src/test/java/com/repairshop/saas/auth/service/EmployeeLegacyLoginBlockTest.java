@@ -81,7 +81,10 @@ class EmployeeLegacyLoginBlockTest {
         new OtpPolicy(false, "9876543210", true);
         try {
             User u = user("PICKUP_PERSON");
-            assertThrows(ForbiddenException.class, () -> auth.sendPasswordResetOtp("9876543210"));   // no OTP issued
+            var sent = auth.sendPasswordResetOtp("9876543210");
+            assertEquals(false, sent.get("sent"));                       // 200 + loginType contract kept…
+            assertEquals("EMPLOYEE", sent.get("loginType"));
+            assertTrue(OtpPolicy.activeTestOtp("9876543210").isEmpty()); // …but no OTP issued
             assertThrows(ForbiddenException.class, () -> auth.login(otp("123456")));
             assertFalse(auth.verifyAccountOtp(u.getId(), "9876543210", "123456"));
         } finally {
@@ -98,6 +101,20 @@ class EmployeeLegacyLoginBlockTest {
             // Reaches token issuance (mocks end there) only because the fixed OTP was accepted.
             RuntimeException e = assertThrows(RuntimeException.class, () -> auth.login(otp("123456")));
             assertFalse(e instanceof UnauthorizedException || e instanceof ForbiddenException, e.toString());
+        } finally {
+            new OtpPolicy(false);
+        }
+    }
+
+    @Test
+    void nonAllowListedOwnerCannotUseFixedOtp() {
+        new OtpPolicy(false, "9000000101", true);   // a different number is allow-listed
+        try {
+            user("SHOP_OWNER");
+            auth.sendPasswordResetOtp("9876543210");
+            assertTrue(OtpPolicy.activeTestOtp("9876543210").isEmpty());
+            UnauthorizedException e = assertThrows(UnauthorizedException.class, () -> auth.login(otp("123456")));
+            assertEquals("Invalid OTP", e.getMessage());
         } finally {
             new OtpPolicy(false);
         }
