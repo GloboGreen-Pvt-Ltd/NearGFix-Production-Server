@@ -562,9 +562,14 @@ public class DeviceSecurityService {
         if (active == null || !active) throw new ForbiddenException("Employee is inactive or not assigned to this shop");
         List<UUID> open = jdbc.queryForList("""
                 SELECT a.id FROM technician_attendance a JOIN technicians t ON t.id = a.technician_id
-                 WHERE t.user_id = ? AND a.check_in_at IS NOT NULL AND a.check_out_at IS NULL
-                   AND a.check_in_at > now() - interval '20 hours'
-                   AND (a.shop_id IS NULL OR a.shop_id = ?) LIMIT 1""", UUID.class, p.id(), p.shopId());
+                 WHERE t.user_id = ? AND (a.shop_id IS NULL OR a.shop_id = ?)
+                   AND ((a.check_in_at IS NOT NULL AND a.check_out_at IS NULL
+                         AND a.check_in_at > now() - interval '20 hours')
+                     -- Employee-app check-in (ticket-service) writes only the date + TIME columns.
+                     OR (a.check_in_at IS NULL AND a.check_in_time IS NOT NULL AND a.check_out_time IS NULL
+                         AND a.attendance_date = (now() AT TIME ZONE coalesce(
+                               (SELECT s.timezone FROM shops s WHERE s.id = t.shop_id), 'Asia/Kolkata'))::date))
+                 LIMIT 1""", UUID.class, p.id(), p.shopId());
         if ("CHECK_IN".equals(action)) {
             if (!open.isEmpty()) throw new ConflictException("Already checked in");
             return null;
