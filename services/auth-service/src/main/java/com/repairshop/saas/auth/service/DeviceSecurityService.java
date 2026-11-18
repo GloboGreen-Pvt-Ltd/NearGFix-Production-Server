@@ -465,7 +465,7 @@ public class DeviceSecurityService {
         if (m.length() < 10) throw new UnauthorizedException("Invalid mobile number or MPIN");
         m = m.substring(m.length() - 10);
         List<Map<String, Object>> rows = jdbc.queryForList("""
-                SELECT u.id, u.shop_id, u.email, u.role, u.is_active, s.is_active AS shop_active
+                SELECT u.id, u.shop_id, u.email, u.name, u.role, u.is_active, s.is_active AS shop_active, s.name AS shop_name
                   FROM users u LEFT JOIN shops s ON s.id = u.shop_id
                  WHERE upper(u.role) = 'TECHNICIAN' AND""" + " " + EMP_MOBILE + " = ?", m);
         if (rows.size() != 1) throw new UnauthorizedException("Invalid mobile number or MPIN");
@@ -516,8 +516,17 @@ public class DeviceSecurityService {
         res.put("status", "ACTIVE");
         res.put("accessToken", jwt.issueSessionAccessToken(claims, sid, Date.from(deadline)));
         res.put("refreshToken", refresh);
-        res.put("userId", empId);
-        res.put("shopId", shopId);
+        // Same profile fields as the /auth/login LoginResponse, so the app stores one session shape.
+        res.put("tokenType", "Bearer");
+        res.put("userId", empId.toString());
+        res.put("shopId", shopId.toString());
+        res.put("shopName", u.get("shop_name"));
+        res.put("email", u.get("email"));
+        res.put("name", u.get("name"));
+        res.put("roles", List.of(String.valueOf(u.get("role"))));
+        res.put("loginScope", "OWNER");
+        res.put("loginType", "EMPLOYEE");
+        res.put("deviceSessionId", sid.toString());
         return res;
     }
 
