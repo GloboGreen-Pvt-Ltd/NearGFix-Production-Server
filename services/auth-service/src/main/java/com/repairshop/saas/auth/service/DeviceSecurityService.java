@@ -64,7 +64,7 @@ public class DeviceSecurityService {
         UUID shopId = shop == null ? null : UUID.fromString(shop);
         if (r.stream().anyMatch(x -> x.startsWith("CUSTOMER"))) return new Principal("CUSTOMER", id, "CUSTOMER", 30, 600, null, c);
         if ("SHOP".equals(c.get("loginScope", String.class))) return new Principal("SHOP_MOBILE", id, "PARTNER", 15, 300, shopId, c);
-        if (r.contains("TECHNICIAN")) return new Principal("EMPLOYEE", id, "EMPLOYEE", 15, 120, shopId, c);
+        if (r.contains("TECHNICIAN") || r.contains("STAFF") || r.contains("PICKUP_PERSON")) return new Principal("EMPLOYEE", id, "EMPLOYEE", 15, 120, shopId, c);
         return new Principal("SHOP_OWNER", id, "PARTNER", 15, 300, shopId, c);
     }
 
@@ -405,11 +405,11 @@ public class DeviceSecurityService {
         return com.repairshop.saas.auth.entity.Roles.isAdmin(r);
     }
 
-    /** Employee (TECHNICIAN) of one of the owner's shops; returns {id, shop_id}. */
+    /** Employee (TECHNICIAN / STAFF / PICKUP_PERSON) of one of the owner's shops; returns {id, shop_id}. */
     private Map<String, Object> ownedEmployee(UUID ownerId, UUID employeeId) {
         List<Map<String, Object>> rows = jdbc.queryForList("""
                 SELECT u.id, u.shop_id, s.owner_user_id FROM users u JOIN shops s ON s.id = u.shop_id
-                 WHERE u.id = ? AND upper(u.role) = 'TECHNICIAN'""", employeeId);
+                 WHERE u.id = ? AND upper(u.role) IN ('TECHNICIAN','STAFF','PICKUP_PERSON')""", employeeId);
         if (rows.isEmpty() || !(ownerId.equals(rows.get(0).get("owner_user_id")) || isAdmin(ownerId)))
             throw new ForbiddenException("Employee not found in your shops");
         return rows.get(0);
@@ -467,7 +467,7 @@ public class DeviceSecurityService {
         List<Map<String, Object>> rows = jdbc.queryForList("""
                 SELECT u.id, u.shop_id, u.email, u.name, u.role, u.is_active, s.is_active AS shop_active, s.name AS shop_name
                   FROM users u LEFT JOIN shops s ON s.id = u.shop_id
-                 WHERE upper(u.role) = 'TECHNICIAN' AND""" + " " + EMP_MOBILE + " = ?", m);
+                 WHERE upper(u.role) IN ('TECHNICIAN','STAFF','PICKUP_PERSON') AND""" + " " + EMP_MOBILE + " = ?", m);
         if (rows.size() != 1) throw new UnauthorizedException("Invalid mobile number or MPIN");
         Map<String, Object> u = rows.get(0);
         UUID empId = (UUID) u.get("id");
@@ -671,6 +671,8 @@ public class DeviceSecurityService {
         String type = t == null ? "" : t.toUpperCase();
         if (!type.equals("MPIN") && !type.equals("TPIN")) throw new BadRequestException("pinType must be MPIN or TPIN");
         if (type.equals("TPIN") && !tpinAllowed(p)) throw new ForbiddenException("TPIN is not available for this account");
+        // Employee login MPIN is owner-managed (ownerSetEmployeeMpin) — never self-created / reset.
+        if (type.equals("MPIN") && "EMPLOYEE".equals(p.type())) throw new ForbiddenException("Your MPIN is managed by your shop owner");
         return type;
     }
 

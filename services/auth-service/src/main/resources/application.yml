@@ -40,6 +40,8 @@ app:
     dev-mode: ${OTP_DEV_MODE:false}
     # Comma-separated mobiles allowed to use server-logged, single-use test OTPs. Empty = disabled.
     test-numbers: ${OTP_TEST_NUMBERS:}
+    # true = allow-listed OTP_TEST_NUMBERS get the fixed test code instead of a random one (internal testing only).
+    fixed-test-code-enabled: ${OTP_FIXED_TEST_CODE_ENABLED:false}
   jwt:
     secret: ${JWT_SECRET:your-256-bit-secret-key-for-repair-shop-saas-jwt-signing}
     expiry-ms: ${JWT_EXPIRY_MS:31536000000}   # 365 days — stay logged in until explicit logout (app-lock guards access)
