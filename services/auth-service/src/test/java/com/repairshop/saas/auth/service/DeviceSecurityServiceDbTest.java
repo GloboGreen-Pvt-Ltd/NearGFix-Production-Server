@@ -328,6 +328,45 @@ class DeviceSecurityServiceDbTest {
     }
 
     @Test
+    void employeeChangesOwnMpinWithCurrentMpin() {
+        String m = empMobile();
+        svc.ownerSetEmployeeMpin(b(ownerLogin()), employee, "482916");
+        String t = b(empMpinLogin(m, "482916", "dev-a").get("accessToken"));
+        // wrong current MPIN → counts toward lockout, nothing changes
+        assertEquals("WRONG_PIN:4", assertThrows(UnauthorizedException.class, () -> svc.changeEmployeeMpin(t, "000001", "593027")).getMessage());
+        assertThrows(BadRequestException.class, () -> svc.changeEmployeeMpin(t, "482916", "482916"));   // same as current
+        assertThrows(BadRequestException.class, () -> svc.changeEmployeeMpin(t, "482916", "111111"));   // too simple
+        assertThrows(BadRequestException.class, () -> svc.changeEmployeeMpin(t, "482916", "12ab"));     // not 6 digits
+        int v = jdbc.queryForObject("SELECT credential_version FROM auth_pin_credentials WHERE principal_id = ? AND pin_type = 'MPIN'", Integer.class, employee);
+
+        assertEquals(true, svc.changeEmployeeMpin(t, "482916", "593027").get("reloginRequired"));
+        assertEquals(v + 1, jdbc.queryForObject("SELECT credential_version FROM auth_pin_credentials WHERE principal_id = ? AND pin_type = 'MPIN'", Integer.class, employee));
+        assertThrows(UnauthorizedException.class, () -> svc.requireSession(t));                         // sessions revoked
+        assertThrows(UnauthorizedException.class, () -> empMpinLogin(m, "482916", "dev-a"));            // old MPIN dead
+        assertEquals("ACTIVE", empMpinLogin(m, "593027", "dev-a").get("status"));                       // new MPIN works
+        String hash = jdbc.queryForObject("SELECT pin_hash FROM auth_pin_credentials WHERE principal_id = ? AND pin_type = 'MPIN'", String.class, employee);
+        assertFalse(hash.contains("593027"));
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM auth_security_audit_logs WHERE principal_id = ? AND (coalesce(reason_code,'') LIKE '%593027%' OR coalesce(target_id,'') LIKE '%593027%')", Integer.class, employee));
+
+        svc.ownerSetEmployeeMpin(b(ownerLogin()), employee, "604918");                                    // owner reset still works
+        assertThrows(UnauthorizedException.class, () -> empMpinLogin(m, "593027", "dev-a"));
+        assertEquals("ACTIVE", empMpinLogin(m, "604918", "dev-a").get("status"));
+    }
+
+    @Test
+    void changeMpinLocksOutAndIsEmployeeOnly() {
+        String m = empMobile();
+        svc.ownerSetEmployeeMpin(b(ownerLogin()), employee, "482916");
+        String t = b(empMpinLogin(m, "482916", "dev-a").get("accessToken"));
+        for (int i = 0; i < 4; i++) assertThrows(UnauthorizedException.class, () -> svc.changeEmployeeMpin(t, "000001", "593027"));
+        assertEquals("PIN_LOCKED", assertThrows(UnauthorizedException.class, () -> svc.changeEmployeeMpin(t, "000001", "593027")).getMessage());
+        assertThrows(ForbiddenException.class, () -> svc.changeEmployeeMpin(t, "482916", "593027"));   // locked even with right MPIN
+        String owner = b(start(ownerLogin(), "o-1", false).get("accessToken"));
+        assertThrows(ForbiddenException.class, () -> svc.changeEmployeeMpin(owner, "482916", "593027"));
+        assertThrows(UnauthorizedException.class, () -> svc.changeEmployeeMpin(b(empLogin()), "482916", "593027")); // no device session
+    }
+
+    @Test
     void staffAndPickupRolesUseOwnerSetMpinLogin() {
         String m = empMobile();
         for (String role : new String[]{"STAFF", "PICKUP_PERSON"}) {

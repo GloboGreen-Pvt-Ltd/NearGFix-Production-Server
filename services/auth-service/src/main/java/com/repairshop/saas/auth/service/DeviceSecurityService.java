@@ -237,6 +237,35 @@ public class DeviceSecurityService {
         return Map.of("verified", true);
     }
 
+    /**
+     * Employee changes their OWN login MPIN (no OTP). Identity comes only from the
+     * device-session bearer; the current MPIN is verified with the shared lockout
+     * (5 wrong → 15 min). The new MPIN must be valid and differ from the current one.
+     * On success: new Argon2 hash, credential_version+1, and every employee session
+     * is revoked so the employee must log in again with the new MPIN.
+     * Owner set/reset (ownerSetEmployeeMpin) is unchanged.
+     */
+    @Transactional(noRollbackFor = {UnauthorizedException.class, ForbiddenException.class})
+    public Map<String, Object> changeEmployeeMpin(String bearer, String currentMpin, String newMpin) {
+        Session s = requireSession(bearer);
+        Principal p = s.p();
+        if (!"EMPLOYEE".equals(p.type())) throw new ForbiddenException("Only employees can change their login MPIN here");
+        validatePin(newMpin);
+        checkPin(s, "MPIN", currentMpin);   // wrong → attempt logged, lockout applies
+        if (newMpin.equals(currentMpin)) throw new BadRequestException("New MPIN must be different from your current MPIN");
+        int n = jdbc.update("""
+                UPDATE auth_pin_credentials SET pin_hash = ?, credential_version = credential_version + 1,
+                       failed_attempts = 0, locked_until = NULL, reset_at = now(), updated_at = now()
+                 WHERE principal_type = 'EMPLOYEE' AND principal_id = ? AND app_type = 'EMPLOYEE' AND pin_type = 'MPIN'""",
+                hash(p, "MPIN", newMpin), p.id());
+        if (n != 1) throw new BadRequestException("MPIN_NOT_SET");
+        for (Map<String, Object> r : jdbc.queryForList(
+                "SELECT id FROM auth_device_sessions WHERE principal_type = 'EMPLOYEE' AND principal_id = ? AND revoked_at IS NULL", p.id()))
+            revokeSession((UUID) r.get("id"), "MPIN_CHANGED");
+        audit(p, s.id(), "MPIN_CHANGED_BY_EMPLOYEE", null, null, null, "SUCCESS", null);
+        return Map.of("changed", true, "reloginRequired", true);
+    }
+
     /** OTP-verified reset: otpLoginToken must be a fresh existing-OTP-login token for the same account. */
     @Transactional
     public Map<String, Object> resetPin(String bearer, String pinType, String otpLoginToken, String newPin,
