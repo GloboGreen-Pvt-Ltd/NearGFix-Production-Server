@@ -1,8 +1,11 @@
 package com.repairshop.saas.auth.service;
 
+import com.repairshop.saas.auth.exception.TooManyRequestsException;
+import com.repairshop.saas.auth.exception.UnauthorizedException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -10,8 +13,43 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class OtpPolicyTest {
 
+    static final String M = "9876543210";
+
     @AfterEach
     void reset() { new OtpPolicy(false); }
+
+    @SuppressWarnings("unchecked")
+    static Object entry() throws Exception {
+        var f = OtpPolicy.class.getDeclaredField("TEST_OTPS");
+        f.setAccessible(true);
+        return ((Map<String, Object>) f.get(null)).get(M);
+    }
+
+    static Object field(Object o, String name) throws Exception {
+        var f = o.getClass().getDeclaredField(name);
+        f.setAccessible(true);
+        return f.get(o);
+    }
+
+    static void set(Object o, String name, Object v) throws Exception {
+        var f = o.getClass().getDeclaredField(name);
+        f.setAccessible(true);
+        f.set(o, v);
+    }
+
+    static String code() throws Exception { return (String) field(entry(), "code"); }
+
+    /** Moves issue history back so a new issue is not treated as a duplicate send. */
+    @SuppressWarnings("unchecked")
+    static void age(long ms) throws Exception {
+        var f = OtpPolicy.class.getDeclaredField("TEST_ISSUES");
+        f.setAccessible(true);
+        Deque<Long> q = ((Map<String, Deque<Long>>) f.get(null)).get(M);
+        int n = q.size();
+        for (int i = 0; i < n; i++) q.addLast(q.pollFirst() - ms);
+        Object e = entry();
+        if (e != null) set(e, "used", true);   // the live code is no longer a reusable duplicate
+    }
 
     @Test
     void productionRejectsFixedDefaultOtpAndHidesHints() {
@@ -26,33 +64,70 @@ class OtpPolicyTest {
     }
 
     @Test
-    void testNumbersGetSingleUseOtpOnlyForAllowListedMobiles() {
-        new OtpPolicy(false, "+91 98765 43210");
-        assertFalse(OtpPolicy.verifyTestOtp("9876543210", "123456"));      // nothing issued
-        OtpPolicy.issueTestOtp("9876543210");
-        assertFalse(OtpPolicy.mobileMatch("9876543210", "123456", "123456")); // no universal code
-        OtpPolicy.issueTestOtp("9000000000");                                // not allow-listed: no-op
+    void nonAllowListedNumbersGetNothing() {
+        new OtpPolicy(false, M);
+        OtpPolicy.issueTestOtp("9000000000");
         assertFalse(OtpPolicy.verifyTestOtp("9000000000", "000000"));
-        for (int i = 0; i < OtpPolicy.TEST_MAX_ATTEMPTS; i++) OtpPolicy.verifyTestOtp("9876543210", "x");
+        assertFalse(OtpPolicy.mobileMatch("9000000000", "123456", "123456"));
         assertFalse(OtpPolicy.isTestNumber("user@x.com"));
-        // Rate limit: 3 issues per window (one already used above).
-        OtpPolicy.issueTestOtp("9876543210");
-        OtpPolicy.issueTestOtp("9876543210");
-        assertThrows(RuntimeException.class, () -> OtpPolicy.issueTestOtp("9876543210"));
+        new OtpPolicy(false, "");                       // empty list = disabled
+        OtpPolicy.issueTestOtp(M);
+        assertFalse(OtpPolicy.verifyTestOtp(M, "123456"));
     }
 
     @Test
-    void issuedTestOtpIsSingleUse() throws Exception {
-        new OtpPolicy(false, "9876543210");
-        OtpPolicy.issueTestOtp("9876543210");
-        java.lang.reflect.Field f = OtpPolicy.class.getDeclaredField("TEST_OTPS");
-        f.setAccessible(true);
-        Object entry = ((Map<?, ?>) f.get(null)).get("9876543210");
-        java.lang.reflect.Field c = entry.getClass().getDeclaredField("code");
-        c.setAccessible(true);
-        String code = (String) c.get(entry);
-        assertTrue(OtpPolicy.mobileMatch("98765 43210", "123456", code));
-        assertFalse(OtpPolicy.mobileMatch("9876543210", "123456", code));   // consumed
+    void threeRequestsPer15MinutesThen429WithRetryAfter() throws Exception {
+        new OtpPolicy(false, M);
+        OtpPolicy.issueTestOtp(M);
+        String first = code();
+        OtpPolicy.issueTestOtp(M);                       // rapid duplicate: same code, not counted
+        assertEquals(first, code());
+        age(31_000);
+        OtpPolicy.issueTestOtp(M);                       // 2nd
+        age(31_000);
+        OtpPolicy.issueTestOtp(M);                       // 3rd
+        age(31_000);
+        TooManyRequestsException ex = assertThrows(TooManyRequestsException.class, () -> OtpPolicy.issueTestOtp(M));
+        long expected = (15 * 60) - 93;                  // oldest request is 93 s old
+        assertTrue(Math.abs(ex.getRetryAfterSeconds() - expected) <= 2, "retryAfter=" + ex.getRetryAfterSeconds());
+    }
+
+    @Test
+    void tenWrongAttemptsInvalidateWithRemainingCount() throws Exception {
+        new OtpPolicy(false, M);
+        OtpPolicy.issueTestOtp(M);
+        String good = code();
+        String bad = good.equals("000000") ? "111111" : "000000";
+        for (int i = 1; i <= 9; i++) {
+            UnauthorizedException e = assertThrows(UnauthorizedException.class, () -> OtpPolicy.verifyTestOtp(M, bad));
+            assertEquals("Incorrect OTP. " + (10 - i) + ((10 - i) == 1 ? " attempt" : " attempts") + " left.", e.getMessage());
+        }
+        assertEquals("Too many incorrect attempts. Please request a new OTP.",
+                assertThrows(UnauthorizedException.class, () -> OtpPolicy.verifyTestOtp(M, bad)).getMessage());
+        assertThrows(UnauthorizedException.class, () -> OtpPolicy.verifyTestOtp(M, good));   // invalidated
+    }
+
+    @Test
+    void validOtpIsSingleUseAndNoUniversalCode() throws Exception {
+        new OtpPolicy(false, "+91 98765 43210");
+        OtpPolicy.issueTestOtp(M);
+        String good = code();
+        if (!good.equals("123456"))
+            assertThrows(UnauthorizedException.class, () -> OtpPolicy.mobileMatch(M, "123456", "123456"));
+        assertTrue(OtpPolicy.mobileMatch("98765 43210", "123456", good));
+        assertEquals("This OTP has already been used. Please request a new OTP.",
+                assertThrows(UnauthorizedException.class, () -> OtpPolicy.verifyTestOtp(M, good)).getMessage());
+    }
+
+    @Test
+    void expiredOtpRejected() throws Exception {
+        new OtpPolicy(false, M);
+        OtpPolicy.issueTestOtp(M);
+        String good = code();
+        set(entry(), "exp", System.currentTimeMillis() - 1);
+        assertEquals("OTP expired. Please request a new OTP.",
+                assertThrows(UnauthorizedException.class, () -> OtpPolicy.verifyTestOtp(M, good)).getMessage());
+        assertEquals(5 * 60 * 1000L, OtpPolicy.TEST_TTL_MS);
     }
 
     @Test
