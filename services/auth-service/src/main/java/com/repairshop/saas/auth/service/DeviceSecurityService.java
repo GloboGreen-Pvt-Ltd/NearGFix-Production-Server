@@ -254,6 +254,7 @@ public class DeviceSecurityService {
         Session s = requireSession(bearer);
         String type = pinType(pinType, s.p());
         validatePin(pin);
+        if ("TPIN".equals(type)) requireUniqueTpin(s.p(), pin);
         try {
             jdbc.update("""
                     INSERT INTO auth_pin_credentials (principal_type, principal_id, app_type, pin_type, pin_hash)
@@ -310,6 +311,7 @@ public class DeviceSecurityService {
         if (!otp.id().equals(s.p().id()) || !otp.type().equals(s.p().type())) throw new ForbiddenException("OTP account mismatch");
         String type = pinType(pinType, s.p());
         validatePin(newPin);
+        if ("TPIN".equals(type)) requireUniqueTpin(s.p(), newPin);
         String method = verificationMethod == null ? "OTP" : trim(verificationMethod.toUpperCase(), 50);
         int n = jdbc.update("""
                 UPDATE auth_pin_credentials SET pin_hash = ?, credential_version = credential_version + 1,
@@ -439,21 +441,16 @@ public class DeviceSecurityService {
         int fails = recent == null ? 0 : recent;
         if (fails >= MAX_PIN_FAILS) throw new UnauthorizedException("PIN_LOCKED");
 
-        List<Map<String, Object>> cands = pin != null && pin.matches("\\d{6}") ? jdbc.queryForList("""
-                SELECT c.id, c.principal_type, c.principal_id, c.pin_hash, c.credential_version
-                  FROM auth_pin_credentials c JOIN users u ON u.id = c.principal_id
-                 WHERE c.pin_type = 'TPIN' AND c.app_type = 'ANY'
-                   AND (c.locked_until IS NULL OR c.locked_until <= now())
-                   AND ((c.principal_type IN ('SHOP_OWNER','SHOP_MOBILE')
-                         AND (c.principal_id = ? OR c.principal_id = (SELECT owner_user_id FROM shops WHERE id = ?)))
-                     OR (c.principal_type = 'EMPLOYEE' AND u.shop_id = ? AND u.is_active = true
-                         AND upper(u.role) IN ('TECHNICIAN','STAFF','PICKUP_PERSON')))""",
-                caller.id(), shopId, shopId) : List.of();
-        List<Map<String, Object>> hits = new ArrayList<>();
-        for (Map<String, Object> c : cands) {
-            Principal cp = new Principal((String) c.get("principal_type"), (UUID) c.get("principal_id"), "ANY", 15, 120, shopId, null);
-            if (argon.matches(pepper(cp, "TPIN", pin), (String) c.get("pin_hash"))) hits.add(c);
+        List<Map<String, Object>> hits = pin != null && pin.matches("\\d{6}")
+                ? tpinMatches(caller.id(), shopId, pin, true) : List.of();
+        // One person can hold several TPIN rows (e.g. SHOP_OWNER + SHOP_MOBILE under the same
+        // user id): count PEOPLE, not rows. Prefer the caller's own row for that person.
+        Map<UUID, Map<String, Object>> people = new LinkedHashMap<>();
+        for (Map<String, Object> c : hits) {
+            UUID pid = (UUID) c.get("principal_id");
+            if (!people.containsKey(pid) || caller.type().equals(c.get("principal_type"))) people.put(pid, c);
         }
+        hits = new ArrayList<>(people.values());
         if (hits.size() != 1) {
             boolean dup = hits.size() > 1;
             audit(caller, s.id(), "TPIN_AUTO_VERIFY", action, null, null, "DENIED", dup ? "AMBIGUOUS_PIN" : "WRONG_PIN");
@@ -472,6 +469,39 @@ public class DeviceSecurityService {
         attempt((UUID) c.get("id"), s.id(), true, null);
         audit(caller, s.id(), "TPIN_AUTO_VERIFY", action, type, id.toString(), "SUCCESS", null);
         return new Object[]{approver, ((Number) c.get("credential_version")).intValue()};
+    }
+
+    /**
+     * TPIN credentials of the shop's owner / shop login / active employees whose hash
+     * matches {@code pin} (Argon2 + pepper, never compared in plain text).
+     * LEFT JOIN: a shop-login credential may not map to a users row.
+     */
+    private List<Map<String, Object>> tpinMatches(UUID callerId, UUID shopId, String pin, boolean skipLocked) {
+        if (shopId == null) return List.of();
+        List<Map<String, Object>> cands = jdbc.queryForList("""
+                SELECT c.id, c.principal_type, c.principal_id, c.pin_hash, c.credential_version
+                  FROM auth_pin_credentials c LEFT JOIN users u ON u.id = c.principal_id
+                 WHERE c.pin_type = 'TPIN' AND c.app_type = 'ANY'
+                   AND (? = false OR c.locked_until IS NULL OR c.locked_until <= now())
+                   AND ((c.principal_type IN ('SHOP_OWNER','SHOP_MOBILE')
+                         AND (c.principal_id = ? OR c.principal_id = ? OR u.shop_id = ?
+                              OR c.principal_id = (SELECT owner_user_id FROM shops WHERE id = ?)))
+                     OR (c.principal_type = 'EMPLOYEE' AND u.shop_id = ? AND u.is_active = true
+                         AND upper(u.role) IN ('TECHNICIAN','STAFF','PICKUP_PERSON')))""",
+                skipLocked, callerId, shopId, shopId, shopId, shopId);
+        List<Map<String, Object>> hits = new ArrayList<>();
+        for (Map<String, Object> c : cands) {
+            Principal cp = new Principal((String) c.get("principal_type"), (UUID) c.get("principal_id"), "ANY", 15, 120, shopId, null);
+            if (argon.matches(pepper(cp, "TPIN", pin), (String) c.get("pin_hash"))) hits.add(c);
+        }
+        return hits;
+    }
+
+    /** Setting/resetting a TPIN: refuse one already used by ANOTHER person in the same shop (who is never revealed). */
+    private void requireUniqueTpin(Principal p, String pin) {
+        for (Map<String, Object> c : tpinMatches(p.id(), p.shopId(), pin, false))
+            if (!p.id().equals(c.get("principal_id")))
+                throw new ConflictException("TPIN_IN_USE: This TPIN is not available. Choose a different TPIN.");
     }
 
     private String actorRole(Principal p) {

@@ -548,13 +548,44 @@ class DeviceSecurityServiceDbTest {
         String e = b(start(empLogin(), "e-1", false).get("accessToken"));
         svc.createPin(e, "TPIN", "252525");
         jdbc.update("INSERT INTO technician_attendance (technician_id, attendance_date, check_in_at, shop_id) VALUES (?, current_date, now(), ?)", tech, shop);
+        jdbc.update("UPDATE users SET is_active = false WHERE id = ?", employee);   // legacy duplicate (set before uniqueness check)
         secondEmployee("252525");                                                   // same PIN as Emp B
+        jdbc.update("UPDATE users SET is_active = true WHERE id = ?", employee);
         ForbiddenException ex = assertThrows(ForbiddenException.class,
                 () -> svc.authorizeTransaction(o, "252525", "REPAIR_BOOKING", null, null, "c1", null));
         assertTrue(ex.getMessage().startsWith("TPIN_AMBIGUOUS"));
         assertFalse(ex.getMessage().contains("Emp B") || ex.getMessage().contains("Emp C"));
         assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM auth_transaction_authorizations WHERE session_id IN (SELECT id FROM auth_device_sessions WHERE principal_id = ?)", Integer.class, owner));
         assertEquals("SHOP_OWNER", svc.authorizeTransaction(o, "739154", "REPAIR_BOOKING", null, null, "c2", null).get("actorType")); // unique PIN still fine
+    }
+
+    @Test
+    void ownerTpinOnOwnerAndShopLoginCountsAsOnePerson() {
+        String o = b(start(ownerLogin(), "o-1", false).get("accessToken"));
+        String sh = b(start(jwt.generateToken(owner, shop, owner + "@t.in", List.of("SHOP_OWNER"), "SHOP"), "s-1", false).get("accessToken"));
+        svc.createPin(o, "TPIN", "739154");
+        svc.createPin(sh, "TPIN", "739154");                                         // same person, same PIN: allowed
+        assertEquals("SHOP_OWNER", svc.authorizeTransaction(o, "739154", "REPAIR_BOOKING", null, null, "c1", null).get("actorType"));
+        assertEquals("SHOP_MOBILE", svc.authorizeTransaction(sh, "739154", "REPAIR_BOOKING", null, null, "c2", null).get("actorType"));
+        // Employee TPIN still approves a booking from the owner's session.
+        String e = b(start(empLogin(), "e-1", false).get("accessToken"));
+        svc.createPin(e, "TPIN", "252525");
+        jdbc.update("INSERT INTO technician_attendance (technician_id, attendance_date, check_in_at, shop_id) VALUES (?, current_date, now(), ?)", tech, shop);
+        assertEquals(employee, svc.authorizeTransaction(o, "252525", "REPAIR_BOOKING", null, null, "c3", null).get("actorId"));
+    }
+
+    @Test
+    void tpinMustBeUniqueAcrossOwnerAndEmployeesOfTheShop() {
+        String o = b(start(ownerLogin(), "o-1", false).get("accessToken"));
+        svc.createPin(o, "TPIN", "739154");
+        String e = b(start(empLogin(), "e-1", false).get("accessToken"));
+        ConflictException ex = assertThrows(ConflictException.class, () -> svc.createPin(e, "TPIN", "739154"));
+        assertTrue(ex.getMessage().startsWith("TPIN_IN_USE"));
+        assertFalse(ex.getMessage().contains("Owner"));
+        svc.createPin(e, "TPIN", "252525");
+        // Reset to another person's TPIN is refused too; own current PIN is not a conflict.
+        String otp = jwt.generateToken(owner, shop, owner + "@t.in", List.of("SHOP_OWNER"), "OWNER");
+        assertThrows(ConflictException.class, () -> svc.resetPin(o, "TPIN", otp, "252525", "OTP"));
     }
 
     @Test
