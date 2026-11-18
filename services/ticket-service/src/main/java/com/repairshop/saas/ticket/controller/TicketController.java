@@ -40,6 +40,7 @@ public class TicketController {
     private final com.repairshop.saas.ticket.whatsapp.WhatsAppNotificationService whatsApp;
     private final com.repairshop.saas.ticket.service.OwnerTechnicianService ownerTechnician;
     private final com.repairshop.saas.ticket.security.BookingPinVerifier bookingPinVerifier;
+    private final com.repairshop.saas.ticket.security.TpinGuard tpinGuard;
 
     private UUID shopIdFrom(HttpServletRequest request) {
         String sid = (String) request.getAttribute("shopId");
@@ -171,6 +172,8 @@ public class TicketController {
         String pinToken = request.getHeader("X-Booking-Pin");
         var bookedBy = pinToken != null && !pinToken.isBlank()
                 ? bookingPinVerifier.verify(pinToken.trim(), shopId, userIdFrom(request)) : null;
+        // Else: the TPIN approver consumed for this request (owner / shop / employee).
+        if (bookedBy == null) bookedBy = tpinGuard.approver(request);
         TicketResponse created = ticketService.create(shopId, body);
         if (bookedBy != null) {
             created = ticketService.recordBookedBy(shopId, created.getId(), bookedBy.userId(), bookedBy.name(), bookedBy.role());

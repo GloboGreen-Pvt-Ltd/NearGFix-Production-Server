@@ -66,7 +66,25 @@ public class TpinGuard {
                 INSERT INTO auth_security_audit_logs (principal_type, principal_id, session_id, event_type, action_type, target_id, result)
                 SELECT actor_type, actor_id, session_id, 'TPIN_CONSUMED', action_type, target_id, 'SUCCESS'
                   FROM auth_transaction_authorizations WHERE id = ?""", ids.get(0));
+        req.setAttribute(APPROVAL_ATTR, ids.get(0));
         return ids.get(0);
+    }
+
+    static final String APPROVAL_ATTR = "tpin.authorizationId";
+
+    /**
+     * Who approved this request with their TPIN (server-verified by auth-service:
+     * owner, shop login or the shop's employee), from the authorization consumed for
+     * it. Null when no TPIN authorization was consumed. Never from client input.
+     */
+    public BookingPinVerifier.BookedBy approver(HttpServletRequest req) {
+        if (!(req.getAttribute(APPROVAL_ATTR) instanceof UUID id)) return null;
+        List<BookingPinVerifier.BookedBy> r = jdbc.query("""
+                SELECT a.actor_type, a.actor_id, u.name FROM auth_transaction_authorizations a
+                  LEFT JOIN users u ON u.id = a.actor_id WHERE a.id = ? AND a.consumed_at IS NOT NULL""",
+                (rs, i) -> new BookingPinVerifier.BookedBy((UUID) rs.getObject("actor_id"), rs.getString("name"),
+                        "EMPLOYEE".equals(rs.getString("actor_type")) ? "EMPLOYEE" : "OWNER"), id);
+        return r.isEmpty() ? null : r.get(0);
     }
 
     private static String sha256(String s) {
