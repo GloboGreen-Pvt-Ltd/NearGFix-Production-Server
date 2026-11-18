@@ -106,4 +106,60 @@ class TpinGuardDbTest {
         String t = authorize("REPAIR_BOOKING", TpinInterceptor.sha256("POST /tickets"));
         assertTrue(i.preHandle(req("POST", "/tickets", t), new MockHttpServletResponse(), null));
     }
+
+    // ---- Partner app: TPIN on pickup receive-at-shop and return-delivery handover ----
+
+    static final List<String> PARTNER_ROUTES = List.of(
+            "POST /shop/pickup-bookings/*/receive-at-shop=PICKUP_DELIVERY",
+            "POST /tickets/*/repair-delivery/release=PICKUP_DELIVERY");
+
+    @Test
+    void receiveAtShopAndReleaseRecordVerifiedApproverOnce() {
+        jdbc.update("UPDATE users SET name = 'Nandha' WHERE id = ?", emp);
+        jdbc.update("INSERT INTO technician_attendance (technician_id, attendance_date, check_in_at, shop_id) VALUES (?, current_date, now(), ?)", tech, shop);
+        TpinInterceptor i = new TpinInterceptor(guard, PARTNER_ROUTES);
+        for (String uri : List.of("/shop/pickup-bookings/" + UUID.randomUUID() + "/receive-at-shop",
+                                  "/tickets/" + UUID.randomUUID() + "/repair-delivery/release")) {
+            String t = authorize("PICKUP_DELIVERY", TpinInterceptor.sha256("POST " + uri));
+            MockHttpServletRequest r = req("POST", uri, t);
+            assertTrue(i.preHandle(r, new MockHttpServletResponse(), null));
+            // Approver comes from the consumed authorization, never from the client.
+            assertEquals(emp, guard.approver(r).userId());
+            assertEquals("Nandha (Technician)", guard.approverLabel(r));
+            // Same token again (double tap / replay) → refused, nothing recorded twice.
+            assertThrows(ResponseStatusException.class, () -> i.preHandle(req("POST", uri, t), new MockHttpServletResponse(), null));
+            // A token for one route can't be used on the other.
+            String other = authorize("PICKUP_DELIVERY", TpinInterceptor.sha256("POST /tickets/x/repair-delivery/release"));
+            assertThrows(ResponseStatusException.class, () -> i.preHandle(req("POST", uri, other), new MockHttpServletResponse(), null));
+        }
+    }
+
+    @Test
+    void ownerApproverLabelAndNoApproverWithoutTpin() {
+        UUID owner = UUID.randomUUID(), osid = UUID.randomUUID();
+        jdbc.update("INSERT INTO users (id, shop_id, email, role, name, is_active) VALUES (?,?,?,'SHOP_OWNER','Owner A',true)", owner, shop, owner + "@t.in");
+        jdbc.update("""
+                INSERT INTO auth_device_sessions (id, principal_type, principal_id, app_type, device_id_hash, otp_verified_at, otp_expires_at)
+                VALUES (?, 'SHOP_OWNER', ?, 'PARTNER', 'ho', now(), now() + interval '15 days')""", osid, owner);
+        jdbc.update("INSERT INTO auth_pin_credentials (principal_type, principal_id, app_type, pin_type, pin_hash) VALUES ('SHOP_OWNER', ?, 'ANY', 'TPIN', 'x')", owner);
+        String uri = "/tickets/" + UUID.randomUUID() + "/repair-delivery/release";
+        String secret = UUID.randomUUID().toString();
+        jdbc.update("""
+                INSERT INTO auth_transaction_authorizations (session_id, actor_type, actor_id, shop_id, action_type, context_hash,
+                    auth_token_hash, credential_version, expires_at) VALUES (?, 'SHOP_OWNER', ?, ?, 'PICKUP_DELIVERY', ?, ?, 1, now() + interval '2 minutes')""",
+                osid, owner, shop, TpinInterceptor.sha256("POST " + uri), TpinInterceptor.sha256(secret));
+        String ob = "Bearer " + Jwts.builder().subject(owner.toString()).claim("sid", osid.toString()).claim("shopId", shop.toString())
+                .claim("roles", List.of("SHOP_OWNER")).issuedAt(new Date()).expiration(new Date(System.currentTimeMillis() + 900_000))
+                .signWith(Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8))).compact();
+        MockHttpServletRequest r = new MockHttpServletRequest("POST", uri);
+        r.addHeader("Authorization", ob);
+        r.addHeader(TpinGuard.HEADER, secret);
+        assertTrue(new TpinInterceptor(guard, PARTNER_ROUTES).preHandle(r, new MockHttpServletResponse(), null));
+        assertEquals("Owner A (Owner)", guard.approverLabel(r));
+        // Not enforced + no TPIN header → action proceeds, no approver recorded.
+        MockHttpServletRequest plain = req("POST", uri, null);
+        assertTrue(new TpinInterceptor(guard, PARTNER_ROUTES).preHandle(plain, new MockHttpServletResponse(), null));
+        assertNull(guard.approver(plain));
+        assertNull(guard.approverLabel(plain));
+    }
 }

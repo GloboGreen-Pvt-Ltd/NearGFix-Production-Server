@@ -41,6 +41,7 @@ public class ShopPickupBookingController {
 
     private final PickupBookingController pickupBookingController;
     private final JdbcTemplate jdbc;
+    private final com.repairshop.saas.ticket.security.TpinGuard tpinGuard;
 
     /**
      * Shop staff confirms the device has been physically handed over by
@@ -119,6 +120,14 @@ public class ShopPickupBookingController {
                     PickupBookingController.value(body, "receivedByName"),
                     PickupBookingController.value(body, "receivedByUserName"),
                     pickupBookingController.lookupUserDisplayName(userId));
+            // TPIN-verified receiver (owner / shop / same-shop employee) wins over any
+            // client-supplied name: id + "Name (Role)" come from the consumed authorization.
+            var approver = tpinGuard.approver(request);
+            String approverLabel = tpinGuard.approverLabel(request);
+            if (approver != null && approver.userId() != null) {
+                userId = approver.userId();
+                staffName = approverLabel != null ? approverLabel : approver.name();
+            }
 
             log.info("receive-at-shop: BEFORE UPDATE booking={} shop={} staff={} name={}",
                     id, shopId, userId, staffName);
@@ -150,7 +159,8 @@ public class ShopPickupBookingController {
 
             try {
                 pickupBookingController.appendEvent(id, "RECEIVED_AT_SHOP",
-                        staffName != null ? "Received by " + staffName : "Device received at shop",
+                        approver != null ? "Received by " + staffName + " · TPIN verified"
+                                : staffName != null ? "Received by " + staffName : "Device received at shop",
                         "SHOP_STAFF");
             } catch (Exception e) {
                 log.warn("receive-at-shop: event insert failed for {}: {}", id, e.getMessage());

@@ -31,6 +31,7 @@ public class RepairDeliveryController {
             "accept", "decline", "collect", "start", "arrive", "complete", "fail", "return");
 
     private final RepairDeliveryService service;
+    private final com.repairshop.saas.ticket.security.TpinGuard tpinGuard;
 
     // ------------------------------------------------------------------ owner
 
@@ -59,7 +60,8 @@ public class RepairDeliveryController {
 
     @PostMapping("/tickets/{ticketId}/repair-delivery/release")
     public Map<String, Object> release(@PathVariable UUID ticketId, HttpServletRequest req) {
-        return service.release(ownerShop(req), ticketId);
+        // TPIN-verified "Name (Role)" (owner / shop / same-shop employee), recorded in the delivery history.
+        return service.release(ownerShop(req), ticketId, tpinGuard.approverLabel(req));
     }
 
     @PostMapping("/tickets/{ticketId}/repair-delivery/receive-return")

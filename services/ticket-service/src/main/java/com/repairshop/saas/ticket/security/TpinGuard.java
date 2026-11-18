@@ -87,6 +87,22 @@ public class TpinGuard {
         return r.isEmpty() ? null : r.get(0);
     }
 
+    /** "Name (Role)" of the server-verified TPIN approver for this request, or null. */
+    public String approverLabel(HttpServletRequest req) {
+        if (!(req.getAttribute(APPROVAL_ATTR) instanceof UUID id)) return null;
+        List<String> r = jdbc.query("""
+                SELECT a.actor_type, u.name, u.role FROM auth_transaction_authorizations a
+                  LEFT JOIN users u ON u.id = a.actor_id WHERE a.id = ? AND a.consumed_at IS NOT NULL""",
+                (rs, i) -> {
+                    String type = rs.getString("actor_type"), role = String.valueOf(rs.getString("role")).toUpperCase();
+                    String label = "SHOP_OWNER".equals(type) ? "Owner" : "SHOP_MOBILE".equals(type) ? "Shop"
+                            : "STAFF".equals(role) ? "Staff" : "PICKUP_PERSON".equals(role) ? "Pickup Person" : "Technician";
+                    String name = rs.getString("name");
+                    return (name == null || name.isBlank() ? label : name) + " (" + label + ")";
+                }, id);
+        return r.isEmpty() ? null : r.get(0);
+    }
+
     private static String sha256(String s) {
         try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(s.getBytes(StandardCharsets.UTF_8))); }
         catch (Exception e) { throw new IllegalStateException(e); }

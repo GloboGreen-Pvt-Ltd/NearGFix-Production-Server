@@ -30,7 +30,7 @@ app:
   security:
     # One-time TPIN (X-TPIN-Authorization) on protected routes / attendance (migration 123).
     tpin-enforced: ${TPIN_ENFORCED:false}
-    tpin-routes: ${TPIN_ROUTES:POST /tickets=REPAIR_BOOKING, PATCH /tickets/*/status=TICKET_STATUS, PATCH /technicians/me/pickup-bookings/*/status=PICKUP_DELIVERY, POST /technicians/me/sell-pickups/*/payment=PAYMENT}
+    tpin-routes: ${TPIN_ROUTES:POST /tickets=REPAIR_BOOKING, PATCH /tickets/*/status=TICKET_STATUS, POST /shop/pickup-bookings/*/receive-at-shop=PICKUP_DELIVERY, POST /tickets/*/repair-delivery/release=PICKUP_DELIVERY, PATCH /technicians/me/pickup-bookings/*/status=PICKUP_DELIVERY, POST /technicians/me/sell-pickups/*/payment=PAYMENT}
   jwt:
     secret: ${JWT_SECRET:your-256-bit-secret-key-for-repair-shop-saas-jwt-signing}
   # WhatsApp booking confirmations via BotBee Nexa. OFF until Meta approves the
