@@ -53,6 +53,35 @@ public class DeviceSecurityService {
         this.jdbc = jdbc; this.jwt = jwt; this.pepper = pepper;
     }
 
+    // ---- Multi-device TESTING allow-list (DEVICE_LIMIT_TEST_ACCOUNTS) -------------
+    // Mobiles listed here may use the EMPLOYEE / CUSTOMER app on several phones at
+    // once (no DEVICE_LIMIT, no owner device approval, other phones stay signed in).
+    // Empty (default) = single-device for everyone. Partner is always multi-device.
+    private volatile Set<String> multiDeviceTesters = Set.of();
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setMultiDeviceTesters(@Value("${app.security.multi-device-test-accounts:}") String numbers) {
+        Set<String> s = new HashSet<>();
+        for (String n : OtpPolicy.splitNumbers(numbers)) {
+            String d = n.replaceAll("\\D", "");
+            if (d.length() >= 10) s.add(d.substring(d.length() - 10));
+        }
+        multiDeviceTesters = Set.copyOf(s);
+        if (!s.isEmpty())
+            org.slf4j.LoggerFactory.getLogger(DeviceSecurityService.class)
+                    .warn("[AUDIT] Multi-device TEST accounts ENABLED for {} number(s); unset DEVICE_LIMIT_TEST_ACCOUNTS after testing", s.size());
+    }
+
+    /** Employee / customer whose registered mobile is on the testing allow-list. */
+    boolean multiDeviceTester(Principal p) {
+        if (multiDeviceTesters.isEmpty() || !("EMPLOYEE".equals(p.type()) || "CUSTOMER".equals(p.type()))) return false;
+        String mobile = "CUSTOMER".equals(p.type())
+                ? jdbc.query("SELECT mobile FROM customer_users WHERE id = ?", rs -> rs.next() ? rs.getString(1) : null, p.id())
+                : jdbc.query("SELECT phone FROM users WHERE id = ?", rs -> rs.next() ? rs.getString(1) : null, p.id());
+        String d = mobile == null ? "" : mobile.replaceAll("\\D", "");
+        return d.length() >= 10 && multiDeviceTesters.contains(d.substring(d.length() - 10));
+    }
+
     // ---------------------------------------------------------------- principal
 
     Principal principal(Claims c) {
@@ -111,7 +140,8 @@ public class DeviceSecurityService {
         // Partner app (owner / shop login): multiple devices allowed (migration 125).
         // Only THIS device's previous session is considered (re-login replaces it);
         // other devices stay signed in. Every other app keeps single-device.
-        boolean multiDevice = "PARTNER".equals(p.app());
+        boolean tester = multiDeviceTester(p);   // employee / customer testing allow-list
+        boolean multiDevice = "PARTNER".equals(p.app()) || tester;
         List<Map<String, Object>> active = jdbc.queryForList("""
                 SELECT id, device_id_hash, device_name, platform, last_active_at FROM auth_device_sessions
                  WHERE principal_type = ? AND principal_id = ? AND app_type = ? AND revoked_at IS NULL
@@ -138,10 +168,10 @@ public class DeviceSecurityService {
         try {
             jdbc.update("""
                     INSERT INTO auth_device_sessions (id, principal_type, principal_id, app_type, device_id_hash,
-                        device_public_key, device_name, platform, otp_verified_at, otp_expires_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                        device_public_key, device_name, platform, otp_verified_at, otp_expires_at, multi_device)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                     sid, p.type(), p.id(), p.app(), devHash, publicKey, trim(deviceName, 150), trim(platform, 20),
-                    Timestamp.from(now), Timestamp.from(deadline));
+                    Timestamp.from(now), Timestamp.from(deadline), tester);
         } catch (DuplicateKeyException e) {
             throw new ConflictException("Another login is in progress. Please retry.");
         }
@@ -619,9 +649,13 @@ public class DeviceSecurityService {
         checkPin(p, null, "MPIN", pin);   // lockout + attempt log + audit on failure
 
         String devHash = sha256(p.type() + ":" + deviceId);
+        // Testing allow-list: several phones at once, no owner device approval; only this
+        // phone's own previous session is replaced. Everyone else: single device as before.
+        boolean tester = multiDeviceTester(p);
         List<Map<String, Object>> active = jdbc.queryForList("""
                 SELECT id, device_id_hash, device_name, platform, last_active_at FROM auth_device_sessions
-                 WHERE principal_type = 'EMPLOYEE' AND principal_id = ? AND app_type = 'EMPLOYEE' AND revoked_at IS NULL FOR UPDATE""", empId);
+                 WHERE principal_type = 'EMPLOYEE' AND principal_id = ? AND app_type = 'EMPLOYEE' AND revoked_at IS NULL
+                   AND (? = false OR device_id_hash = ?) FOR UPDATE""", empId, tester, devHash);
         if (!active.isEmpty()) {
             Map<String, Object> old = active.get(0);
             boolean sameDevice = devHash.equals(old.get("device_id_hash"));
@@ -640,10 +674,10 @@ public class DeviceSecurityService {
         try {
             jdbc.update("""
                     INSERT INTO auth_device_sessions (id, principal_type, principal_id, app_type, device_id_hash,
-                        device_name, platform, otp_verified_at, otp_expires_at)
-                    VALUES (?,?,?,?,?,?,?,?,?)""",
+                        device_name, platform, otp_verified_at, otp_expires_at, multi_device)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
                     sid, p.type(), p.id(), p.app(), devHash, trim(deviceName, 150), trim(platform, 20),
-                    Timestamp.from(now), Timestamp.from(deadline));
+                    Timestamp.from(now), Timestamp.from(deadline), tester);
         } catch (DuplicateKeyException e) {
             throw new ConflictException("Another login is in progress. Please retry.");
         }

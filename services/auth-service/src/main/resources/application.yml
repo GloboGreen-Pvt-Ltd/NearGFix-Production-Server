@@ -34,6 +34,9 @@ app:
   security:
     # Server-held pepper for 6-digit MPIN/TPIN hashes (>= 32 chars). REQUIRED for PIN APIs; env only, never commit.
     pin-pepper: ${PIN_PEPPER:}
+    # TESTING ONLY: comma/space-separated Employee / Customer mobiles allowed on several
+    # phones at once (no device limit / owner device approval). Empty = single-device for all.
+    multi-device-test-accounts: ${DEVICE_LIMIT_TEST_ACCOUNTS:}
   otp:
     # Dev only: accept the fixed default mobile OTP and return devOtp/defaultOtp in responses.
     # MUST stay false in production; mobile OTP then needs a real SMS provider.
