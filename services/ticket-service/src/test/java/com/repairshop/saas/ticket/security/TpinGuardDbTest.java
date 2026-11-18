@@ -86,6 +86,16 @@ class TpinGuardDbTest {
     }
 
     @Test
+    void employeeAppCheckInWithTimeColumnsCountsAtExecution() {
+        String t = authorize("REPAIR_BOOKING", "c");
+        String today = "(now() AT TIME ZONE 'Asia/Kolkata')::date";
+        jdbc.update("INSERT INTO technician_attendance (technician_id, attendance_date, check_in_time) VALUES (?, " + today + " - 1, '09:00')", tech);
+        assertThrows(ResponseStatusException.class, () -> guard.consume(req("POST", "/p", t), "REPAIR_BOOKING", null, "c"));
+        jdbc.update("INSERT INTO technician_attendance (technician_id, attendance_date, check_in_time) VALUES (?, " + today + ", '02:28')", tech);
+        assertNotNull(guard.consume(req("POST", "/p", t), "REPAIR_BOOKING", null, "c"));
+    }
+
+    @Test
     void revokedSessionAndMissingHeaderAreRejected() {
         String t = authorize("CHECK_IN", "c");
         jdbc.update("UPDATE auth_device_sessions SET revoked_at = now() WHERE id = ?", sid);
