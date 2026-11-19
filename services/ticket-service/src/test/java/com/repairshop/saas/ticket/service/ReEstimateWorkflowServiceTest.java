@@ -125,7 +125,9 @@ class ReEstimateWorkflowServiceTest {
                 mock(MasterTechnicianWorkStatusViewRepository.class), mock(InvoiceRepository.class),
                 mirror, mock(TicketNumberService.class), workflow,
                 mock(com.repairshop.saas.common.notify.ShopPushService.class),
-                mock(com.repairshop.saas.common.notify.PushService.class));
+                mock(com.repairshop.saas.common.notify.PushService.class),
+                // Attendance check: every employee counts as checked in for these workflow tests.
+                mock(JdbcTemplate.class, inv -> "queryForObject".equals(inv.getMethod().getName()) ? 1 : null));
 
         // Repair work had started before the extra issue was found.
         event("IN_REPAIR", Instant.now().minusSeconds(3600));

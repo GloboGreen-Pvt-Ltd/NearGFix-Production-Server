@@ -185,6 +185,9 @@ public class ShopPurchaseController {
         Map<String, Object> cur = workflow(id);
         boolean reassign = cur.get("assigned_pickup_person_id") != null;
         if (body.technicianId().equals(uuid(cur.get("assigned_pickup_person_id")))) return ResponseEntity.ok(details(shopId, id)); // double tap
+        if (!com.repairshop.saas.common.notify.EmployeeAttendance.isAssignable(jdbc, shopId, body.technicianId())) {
+            throw new ConflictException(com.repairshop.saas.common.notify.EmployeeAttendance.MESSAGE);
+        }
         // Paid at the door: the employee who paid collects the device.
         if (cur.get("payout_recorded_at") != null) throw new ConflictException("The customer is already paid — the pickup can't be reassigned");
         // A new pickup person accepts afresh and verifies the customer's PIN again; the previous one loses access.

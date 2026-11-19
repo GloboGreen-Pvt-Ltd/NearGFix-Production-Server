@@ -118,7 +118,12 @@ public class RepairDeliveryService {
         d.setNote(str(body.get("note")));
         UUID techId = uuid(body.get("technicianId"));
         if (techId != null) {
-            d.setTechnicianId(employee(shopId, techId).getId());
+            Technician tech = employee(shopId, techId);
+            if (!tech.getId().equals(d.getTechnicianId())
+                    && !com.repairshop.saas.common.notify.EmployeeAttendance.isAssignable(jdbc, shopId, tech.getId())) {
+                throw conflict(com.repairshop.saas.common.notify.EmployeeAttendance.MESSAGE);
+            }
+            d.setTechnicianId(tech.getId());
             d.setStatus("ASSIGNED");
         } else {
             d.setStatus("UNASSIGNED");
@@ -138,6 +143,9 @@ public class RepairDeliveryService {
         Technician tech = employee(shopId, technicianId);
         boolean re = d.getTechnicianId() != null && !d.getTechnicianId().equals(tech.getId());
         if (tech.getId().equals(d.getTechnicianId()) && !"UNASSIGNED".equals(d.getStatus())) return getForShop(shopId, ticketId);
+        if (!com.repairshop.saas.common.notify.EmployeeAttendance.isAssignable(jdbc, shopId, tech.getId())) {
+            throw conflict(com.repairshop.saas.common.notify.EmployeeAttendance.MESSAGE);
+        }
         d.setTechnicianId(tech.getId());
         d.setStatus("ASSIGNED");
         d.setAcceptedAt(null);

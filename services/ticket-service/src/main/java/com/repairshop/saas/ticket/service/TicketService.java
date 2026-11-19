@@ -66,6 +66,7 @@ public class TicketService {
     private final ReEstimateWorkflowService reEstimateWorkflow;
     private final com.repairshop.saas.common.notify.ShopPushService shopPush;
     private final com.repairshop.saas.common.notify.PushService pushService;
+    private final org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     /** Records the PIN-verified "Booked By" on a just-created ticket (set once). */
     @Transactional
@@ -951,6 +952,11 @@ public class TicketService {
                             .userId(value)
                             .name("Technician")
                             .build());
+                }
+                // New (re)assignment only: the employee must be checked in right now (server-side, never the app's flag).
+                if (!tech.getId().equals(technicianBeforePatch)
+                        && !com.repairshop.saas.common.notify.EmployeeAttendance.isAssignable(jdbc, shopId, tech.getId())) {
+                    throw new ResponseStatusException(HttpStatus.CONFLICT, com.repairshop.saas.common.notify.EmployeeAttendance.MESSAGE);
                 }
                 ticket.setAssignedTechnicianId(tech.getId());
                 assignedTechAfterPatch = tech;

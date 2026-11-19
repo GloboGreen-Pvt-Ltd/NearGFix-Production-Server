@@ -70,9 +70,13 @@ public class TechnicianService {
 
     @Transactional(readOnly = true)
     public List<TechnicianResponse> listByShop(UUID shopId) {
+        // Server-confirmed attendance: the Partner App lists only checked-in staff for assignment.
+        Set<UUID> checkedIn = new HashSet<>(jdbc.queryForList(
+                "SELECT t.id FROM technicians t WHERE t.shop_id = ? AND "
+                        + com.repairshop.saas.common.notify.EmployeeAttendance.OPEN_CHECK_IN_SQL, UUID.class, shopId));
         return technicianRepository.findByShopIdOrderByNameAsc(shopId).stream()
                 .filter(t -> !t.isOwner()) // owner's own row is "Assign to Myself", not an employee
-                .map(this::toResponse)
+                .map(t -> { TechnicianResponse r = toResponse(t); r.setCheckedIn(checkedIn.contains(t.getId())); return r; })
                 .collect(Collectors.toList());
     }
 
