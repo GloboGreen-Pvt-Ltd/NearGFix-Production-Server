@@ -83,10 +83,32 @@ class EmployeeAttendanceDbTest {
     }
 
     @Test
-    void ownerAsTechnicianNeedsCheckInToo() {
+    void ownerAsTechnicianOnNeedsNoCheckIn() {
         jdbc.update("UPDATE technicians SET is_owner = true, owner_tech_enabled = true WHERE id = ?", tech);
-        assertFalse(EmployeeAttendance.isAssignable(jdbc, shop, tech));
-        appCheckIn(TODAY, false);
         assertTrue(EmployeeAttendance.isAssignable(jdbc, shop, tech));
+    }
+
+    @Test
+    void ownerAsTechnicianOffIsBlockedEvenIfCheckedIn() {
+        jdbc.update("UPDATE technicians SET is_owner = true, owner_tech_enabled = false WHERE id = ?", tech);
+        appCheckIn(TODAY, false);
+        assertFalse(EmployeeAttendance.isAssignable(jdbc, shop, tech));
+    }
+
+    @Test
+    void ownerTechInactiveAccountOrShopIsBlocked() {
+        jdbc.update("UPDATE technicians SET is_owner = true, owner_tech_enabled = true WHERE id = ?", tech);
+        jdbc.update("UPDATE shops SET is_active = false WHERE id = ?", shop);
+        assertFalse(EmployeeAttendance.isAssignable(jdbc, shop, tech));
+        jdbc.update("UPDATE shops SET is_active = true WHERE id = ?", shop);
+        jdbc.update("UPDATE users SET is_active = false WHERE id = ?", emp);
+        assertFalse(EmployeeAttendance.isAssignable(jdbc, shop, tech));
+    }
+
+    @Test
+    void employeeIsNotExemptViaOwnerSettingAlone() {
+        // owner_tech_enabled without the server-set is_owner flag gives no exemption
+        jdbc.update("UPDATE technicians SET owner_tech_enabled = true WHERE id = ?", tech);
+        assertFalse(EmployeeAttendance.isAssignable(jdbc, shop, tech));
     }
 }

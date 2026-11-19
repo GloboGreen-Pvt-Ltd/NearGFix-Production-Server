@@ -6,7 +6,8 @@ import java.util.UUID;
 
 /**
  * Server-side rule for "can this employee take a new job right now": same shop, active, and
- * checked in (no check-out) for the shop-local workday. Shared by every assignment endpoint so
+ * checked in (no check-out) for the shop-local workday. Owner-as-technician (verified is_owner row with owner_tech_enabled) is exempt
+ * from attendance. Shared by every assignment endpoint so
  * the Partner App's availability flags are never trusted. Existing assignments are untouched.
  */
 public final class EmployeeAttendance {
@@ -27,7 +28,8 @@ public final class EmployeeAttendance {
             WHERE t.id = ? AND t.shop_id = ?
               AND (CASE WHEN t.is_owner THEN t.owner_tech_enabled ELSE t.is_available END)
               AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = t.user_id AND u.is_active = false)
-            """ + " AND " + OPEN_CHECK_IN_SQL;
+              AND EXISTS (SELECT 1 FROM shops s WHERE s.id = t.shop_id AND coalesce(s.is_active, true))
+            """ + " AND (t.is_owner OR " + OPEN_CHECK_IN_SQL + ")"; // owner-as-technician (server is_owner + owner_tech_enabled) needs no attendance
 
     private EmployeeAttendance() {}
 
