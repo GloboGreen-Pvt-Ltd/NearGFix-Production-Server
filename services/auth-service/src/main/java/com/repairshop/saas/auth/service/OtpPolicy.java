@@ -96,23 +96,14 @@ public class OtpPolicy {
         return k != null && testNumbers.contains(k);
     }
 
-    /** Issues a test OTP for an allow-listed number (no-op otherwise). 3 per 15 min → 429 with Retry-After. */
+    /** Issues a test OTP for an allow-listed number (no-op otherwise). No send-rate limit. */
     public static void issueTestOtp(String mobile) {
         if (!isTestNumber(mobile)) return;
         String k = norm(mobile);
         long now = System.currentTimeMillis();
         TestOtp live = TEST_OTPS.get(k);
         if (live != null && !live.used && live.attempts == 0 && now - live.issued < TEST_REUSE_MS) return; // duplicate send
-        java.util.Deque<Long> q = TEST_ISSUES.computeIfAbsent(k, x -> new java.util.ArrayDeque<>());
-        synchronized (q) {
-            while (!q.isEmpty() && now - q.peekFirst() >= TEST_ISSUE_WINDOW_MS) q.pollFirst();
-            if (q.size() >= TEST_MAX_ISSUES) {
-                long retry = (q.peekFirst() + TEST_ISSUE_WINDOW_MS - now + 999) / 1000;
-                log.warn("[AUDIT] TEST_OTP_RATE_LIMITED mobile={} retryAfterSeconds={}", mask(k), retry);
-                throw new com.repairshop.saas.auth.exception.TooManyRequestsException("Too many OTP requests. Try again later.", retry);
-            }
-            q.addLast(now);
-        }
+        // No send-rate limit (partner / employee / customer): every request issues a fresh OTP.
         String code = fixedTestCode ? DEFAULT_OTP : String.format("%06d", RNG.nextInt(1_000_000));
         TEST_OTPS.put(k, new TestOtp(code, now));
         log.warn("[AUDIT] TEST_OTP_ISSUED mobile={} ttlSeconds={}", mask(k), TEST_TTL_MS / 1000);
