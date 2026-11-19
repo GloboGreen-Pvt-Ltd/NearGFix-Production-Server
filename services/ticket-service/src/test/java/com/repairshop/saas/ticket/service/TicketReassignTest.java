@@ -45,6 +45,7 @@ class TicketReassignTest {
     @Mock TicketNumberService ticketNumberService;
     @Mock ReEstimateWorkflowService reEstimateWorkflow;
     @Mock com.repairshop.saas.common.notify.PushService pushService;
+    @Mock org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     @InjectMocks TicketService service;
 
@@ -75,6 +76,19 @@ class TicketReassignTest {
         when(technicianRepository.findById(oldTech.getId())).thenReturn(Optional.of(oldTech));
         when(technicianRepository.findByShopIdAndUserId(shopId, oldUser)).thenReturn(Optional.of(oldTech));
         when(platformRepairBookingRepository.findByTicketId(any())).thenReturn(Optional.empty());
+        when(jdbc.queryForObject(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.eq(Integer.class), any(), any())).thenReturn(1); // checked in
+    }
+
+    @Test
+    void notCheckedInTechnicianCannotBeAssignedAndOldAssignmentStays() {
+        when(jdbc.queryForObject(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.eq(Integer.class), any(), any())).thenReturn(0);
+        ResponseStatusException e = assertThrows(ResponseStatusException.class,
+                () -> service.patch(shopId, ticketId, assign(newTech.getId()), "OWNER"));
+        assertEquals(409, e.getStatusCode().value());
+        assertEquals(oldTech.getId(), ticket.getAssignedTechnicianId());
+        // Re-sending the current technician (already assigned) is never blocked by attendance.
+        service.patch(shopId, ticketId, assign(oldTech.getId()), "OWNER");
+        assertEquals(oldTech.getId(), ticket.getAssignedTechnicianId());
     }
 
     private Map<String, Object> assign(UUID techId) {

@@ -59,6 +59,7 @@ class RepairDeliveryServiceTest {
         booking = PlatformRepairBooking.builder().id(UUID.randomUUID()).ticketId(ticketId).customerUserId(customer).serviceMode("PICKUP").build();
         emp = Technician.builder().id(UUID.randomUUID()).shopId(shopId).userId(empUser).name("Ravi").isAvailable(true).build();
         when(tickets.findByShopIdAndId(shopId, ticketId)).thenReturn(Optional.of(ticket));
+        lenient().when(jdbc.queryForObject(anyString(), eq(Integer.class), any(), any())).thenReturn(1); // checked in
         when(tickets.findById(ticketId)).thenReturn(Optional.of(ticket));
         when(bookings.findByTicketId(ticketId)).thenReturn(Optional.of(booking));
         when(bookingEvents.findCurrentCycle(booking.getId())).thenAnswer(inv -> keys.stream()

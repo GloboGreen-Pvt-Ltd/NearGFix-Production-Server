@@ -38,6 +38,9 @@ public class TechnicianResponse {
     @Schema(description = "Whether available for assignment")
     private Boolean isAvailable;
 
+    @Schema(description = "Checked in (no check-out) for the shop-local workday; only then assignable")
+    private Boolean checkedIn;
+
     @Schema(description = "Salary amount (e.g. 25000)")
     private String salaryAmount;
 
