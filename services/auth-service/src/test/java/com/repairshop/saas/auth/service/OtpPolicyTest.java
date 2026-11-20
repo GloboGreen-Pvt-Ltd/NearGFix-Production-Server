@@ -1,6 +1,5 @@
 package com.repairshop.saas.auth.service;
 
-import com.repairshop.saas.auth.exception.TooManyRequestsException;
 import com.repairshop.saas.auth.exception.UnauthorizedException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -45,7 +44,7 @@ class OtpPolicyTest {
         var f = OtpPolicy.class.getDeclaredField("TEST_ISSUES");
         f.setAccessible(true);
         Deque<Long> q = ((Map<String, Deque<Long>>) f.get(null)).get(M);
-        int n = q.size();
+        int n = q == null ? 0 : q.size();
         for (int i = 0; i < n; i++) q.addLast(q.pollFirst() - ms);
         Object e = entry();
         if (e != null) set(e, "used", true);   // the live code is no longer a reusable duplicate
@@ -76,7 +75,7 @@ class OtpPolicyTest {
     }
 
     @Test
-    void threeRequestsPer15MinutesThen429WithRetryAfter() throws Exception {
+    void noSendRateLimit() throws Exception {
         new OtpPolicy(false, M);
         OtpPolicy.issueTestOtp(M);
         String first = code();
@@ -87,9 +86,7 @@ class OtpPolicyTest {
         age(31_000);
         OtpPolicy.issueTestOtp(M);                       // 3rd
         age(31_000);
-        TooManyRequestsException ex = assertThrows(TooManyRequestsException.class, () -> OtpPolicy.issueTestOtp(M));
-        long expected = (15 * 60) - 93;                  // oldest request is 93 s old
-        assertTrue(Math.abs(ex.getRetryAfterSeconds() - expected) <= 2, "retryAfter=" + ex.getRetryAfterSeconds());
+        assertDoesNotThrow(() -> OtpPolicy.issueTestOtp(M)); // 4th+ allowed: no send limit
     }
 
     @Test
@@ -213,7 +210,7 @@ class OtpPolicyTest {
         age(60_000); OtpPolicy.issueTestOtp(M);
         age(60_000); OtpPolicy.issueTestOtp(M);
         age(60_000);
-        assertThrows(TooManyRequestsException.class, () -> OtpPolicy.issueTestOtp(M));             // 3 per 15 min
+        assertDoesNotThrow(() -> OtpPolicy.issueTestOtp(M));                                        // no send limit
     }
 
     @Test
