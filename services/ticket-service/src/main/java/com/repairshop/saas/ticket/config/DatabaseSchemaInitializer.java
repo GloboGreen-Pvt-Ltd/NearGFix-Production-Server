@@ -39,6 +39,18 @@ public class DatabaseSchemaInitializer {
                     {"handed_over_at", "TIMESTAMPTZ"}, {"handover_json", "TEXT"}, {"inventory_item_id", "UUID"},
             };
             for (String[] c : sell) addColumnIfMissing("sell_orders", c[0], c[1]);
+            // Pickup → shop handover TPIN confirmation (migration 119).
+            addColumnIfMissing("repair_bookings", "handover_requested_at", "TIMESTAMPTZ");
+            addColumnIfMissing("repair_bookings", "handover_verified_role", "VARCHAR(20)");
+            addColumnIfMissing("repair_bookings", "handover_started_at", "TIMESTAMPTZ");
+            try {
+                jdbc.execute("CREATE TABLE IF NOT EXISTS pickup_handover_audit (id UUID PRIMARY KEY, booking_id UUID NOT NULL UNIQUE, "
+                        + "booking_number VARCHAR(60), shop_id UUID NOT NULL, pickup_employee_id UUID, verified_user_id UUID NOT NULL, "
+                        + "verified_user_name VARCHAR(200), verified_role VARCHAR(20) NOT NULL, tpin_authorization_id UUID NOT NULL, "
+                        + "confirmed_at TIMESTAMPTZ NOT NULL DEFAULT now())");
+            } catch (Exception e) {
+                log.warn("Could not ensure pickup_handover_audit: {}", e.getMessage());
+            }
         };
     }
 

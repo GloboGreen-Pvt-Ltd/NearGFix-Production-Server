@@ -343,6 +343,13 @@ public class PickupBookingController {
             if (!isCancel && !PICKUP_FLOW.contains(target)) {
                 return ResponseEntity.badRequest().body(Map.of("error", "invalid status: " + target));
             }
+            // Received at Shop is completed only by the shop's TPIN confirmation
+            // (POST /shop/pickup-bookings/{id}/receive-at-shop) — never by the pickup person.
+            if (target.equals("RECEIVED_AT_SHOP")) {
+                return ResponseEntity.status(403).body(Map.of(
+                        "error", "Shop confirmation with TPIN is required to complete the handover.",
+                        "code", "SHOP_CONFIRMATION_REQUIRED"));
+            }
 
             Technician me = technicianRepository.findByShopIdAndUserId(shopId, userId).orElse(null);
             if (me == null) {
@@ -668,6 +675,92 @@ public class PickupBookingController {
                     "error", "internal: " + e.getClass().getSimpleName() + ": " + e.getMessage()
             ));
         }
+    }
+
+    /**
+     * Pickup person at the shop (REACHED_SHOP) asks the shop to confirm the
+     * device handover. Idempotent: a repeat tap keeps the first request time
+     * and only re-notifies the shop (retry after a missed push).
+     */
+    @PostMapping("/me/pickup-bookings/{id}/handover-request")
+    @Operation(summary = "Pickup person requests shop handover confirmation (TPIN on Partner App)")
+    public ResponseEntity<Map<String, Object>> requestShopHandover(HttpServletRequest request, @PathVariable UUID id) {
+        try {
+            BookingAccess access = requireAssignedPickup(request, id);
+            String status = stringFrom(access.booking, "status");
+            if ("RECEIVED_AT_SHOP".equalsIgnoreCase(status)) return ResponseEntity.ok(handoverState(id));
+            if (!"REACHED_SHOP".equalsIgnoreCase(status)) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "Mark Reached Shop before requesting the shop handover.", "currentStatus", status == null ? "" : status));
+            }
+            int first = jdbc.update("UPDATE repair_bookings SET handover_requested_at = now(), updated_at = now() " +
+                    "WHERE id = CAST(? AS UUID) AND handover_requested_at IS NULL", id.toString());
+            String bookingNumber = stringFrom(access.booking, "booking_number");
+            if (first > 0) appendEvent(id, "HANDOVER_REQUESTED", "Waiting for shop TPIN confirmation", "PICKUP_PERSON");
+            try {
+                String who = firstNonBlank(technicianRepository.findById(access.technicianId).map(Technician::getName).orElse(null), "Pickup person");
+                String title = "Device Received Confirmation";
+                String msg = who.trim() + " · Booking " + bookingNumber + " — confirm the device handover with your TPIN";
+                UUID nid = shopNotifications.insert(access.shopId, "pickups", "HANDOVER_REQUESTED", title, msg, id, bookingNumber, null);
+                Map<String, Object> data = new LinkedHashMap<>();
+                data.put("kind", "PICKUP");
+                data.put("notificationId", nid.toString());
+                data.put("bookingId", id.toString());
+                data.put("bookingNumber", bookingNumber);
+                data.put("statusKey", "HANDOVER_REQUESTED");
+                shopPush.pushToShop(access.shopId, title, msg, data);
+            } catch (Exception e) {
+                log.warn("handover-request: shop notification failed for {}: {}", id, e.getMessage());
+            }
+            return ResponseEntity.ok(handoverState(id));
+        } catch (ResponseStatusException e) {
+            return error(e);
+        }
+    }
+
+    @GetMapping("/me/pickup-bookings/{id}/handover")
+    @Operation(summary = "Shop handover confirmation state for the pickup person")
+    public ResponseEntity<Map<String, Object>> getShopHandover(HttpServletRequest request, @PathVariable UUID id) {
+        try {
+            requireAssignedPickup(request, id);
+            return ResponseEntity.ok(handoverState(id));
+        } catch (ResponseStatusException e) {
+            return error(e);
+        }
+    }
+
+    static String iso(Object v) {
+        if (v instanceof java.sql.Timestamp t) return t.toInstant().toString();
+        if (v instanceof java.time.OffsetDateTime o) return o.toInstant().toString();
+        return v == null ? null : String.valueOf(v);
+    }
+
+    /** NOT_REQUESTED | PENDING | IN_PROGRESS | COMPLETED (+ verifier name / role / time once confirmed). */
+    Map<String, Object> handoverState(UUID id) {
+        Map<String, Object> row = jdbc.queryForMap(
+                "SELECT rb.status, rb.handover_requested_at, (rb.handover_started_at > now() - interval '2 minutes') AS shop_verifying, rb.received_at_shop_at, rb.received_by_user_name, rb.handover_verified_role, " +
+                        "a.verified_user_name, a.verified_role, a.confirmed_at, s.name AS shop_name " +
+                        "FROM repair_bookings rb LEFT JOIN pickup_handover_audit a ON a.booking_id = rb.id " +
+                        "LEFT JOIN shops s ON s.id = rb.shop_id WHERE rb.id = CAST(? AS UUID)",
+                id.toString());
+        String status = stringFrom(row, "status");
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("bookingId", id.toString());
+        out.put("bookingStatus", status);
+        boolean done = "RECEIVED_AT_SHOP".equalsIgnoreCase(status);
+        // "In progress" only while the shop's TPIN step can still finish (authorization TTL 2 min);
+        // a cancelled / abandoned confirmation falls back to PENDING so the employee can resend.
+        boolean started = Boolean.TRUE.equals(row.get("shop_verifying"));
+        out.put("state", done ? "COMPLETED" : row.get("handover_requested_at") == null ? "NOT_REQUESTED" : started ? "IN_PROGRESS" : "PENDING");
+        out.put("shopName", stringFrom(row, "shop_name"));
+        if (row.get("handover_requested_at") != null) out.put("requestedAt", iso(row.get("handover_requested_at")));
+        if (done) {
+            out.put("verifiedByName", firstNonBlank(stringFrom(row, "verified_user_name"), stringFrom(row, "received_by_user_name")));
+            out.put("verifiedRole", firstNonBlank(stringFrom(row, "verified_role"), stringFrom(row, "handover_verified_role")));
+            Object at = row.get("confirmed_at") != null ? row.get("confirmed_at") : row.get("received_at_shop_at");
+            if (at != null) out.put("confirmedAt", iso(at));
+        }
+        return out;
     }
 
     // The shop-staff "Mark Received" endpoint lives in the sibling
