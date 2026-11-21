@@ -25,7 +25,9 @@ app:
   security:
     # One-time TPIN (X-TPIN-Authorization) on protected routes / attendance (migration 123).
     tpin-enforced: ${TPIN_ENFORCED:false}
-    tpin-routes: ${TPIN_ROUTES:POST /shop/buy-orders/*/*=BUY_ORDER, POST /staff/buy-orders/*/*=BUY_ORDER}
+    tpin-routes: ${TPIN_ROUTES:POST /shop/buy-orders/*/*=BUY_ORDER, POST /staff/buy-orders/*/pickup=BUY_ORDER, POST /staff/buy-orders/*/deliver=BUY_ORDER}
+    # Action types enforced before the global switch (staged rollout), e.g. BUY_ORDER.
+    tpin-enforced-actions: ${TPIN_ENFORCED_ACTIONS:}
   jwt:
     secret: ${JWT_SECRET:your-256-bit-secret-key-for-repair-shop-saas-jwt-signing}
 
