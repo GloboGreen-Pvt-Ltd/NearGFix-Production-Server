@@ -51,6 +51,14 @@ public class DatabaseSchemaInitializer {
             } catch (Exception e) {
                 log.warn("Could not ensure pickup_handover_audit: {}", e.getMessage());
             }
+            // Shop presence monitoring (migration 120) — same DDL, idempotent.
+            try {
+                String sql = new String(new org.springframework.core.io.ClassPathResource("db/120_shop_presence.sql").getInputStream().readAllBytes(),
+                        java.nio.charset.StandardCharsets.UTF_8).replace("BEGIN;", "").replace("COMMIT;", "");
+                jdbc.execute(sql);
+            } catch (Exception e) {
+                log.warn("Could not ensure shop presence tables: {}", e.getMessage());
+            }
         };
     }
 
