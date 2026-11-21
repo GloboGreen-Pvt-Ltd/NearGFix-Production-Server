@@ -9,13 +9,19 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.repairshop.saas.ticket.security.TpinGuard;
+import org.springframework.web.server.ResponseStatusException;
+
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -41,7 +47,7 @@ public class ShopPickupBookingController {
 
     private final PickupBookingController pickupBookingController;
     private final JdbcTemplate jdbc;
-    private final com.repairshop.saas.ticket.security.TpinGuard tpinGuard;
+    private final TpinGuard tpinGuard;
 
     /**
      * Shop staff confirms the device has been physically handed over by
@@ -78,7 +84,7 @@ public class ShopPickupBookingController {
             Map<String, Object> current;
             try {
                 current = jdbc.queryForMap(
-                        "SELECT status, shop_id, booking_number, customer_user_id, ticket_id " +
+                        "SELECT status, shop_id, booking_number, customer_user_id, ticket_id, handover_requested_at, assigned_pickup_person_id " +
                                 "FROM repair_bookings WHERE id = CAST(? AS UUID)",
                         id.toString());
             } catch (Exception e) {
@@ -100,14 +106,12 @@ public class ShopPickupBookingController {
 
             // Idempotency: re-tap after the hand-off completed returns the
             // existing ticket without re-firing the event chain.
+            // Duplicate confirmation is rejected (the handover is already audited).
             if ("RECEIVED_AT_SHOP".equalsIgnoreCase(currentStatus)) {
-                Map<String, Object> ok = new LinkedHashMap<>();
-                ok.put("id", id.toString());
-                ok.put("status", "RECEIVED_AT_SHOP");
-                ok.put("previousStatus", currentStatus);
-                if (existingTicketId != null) ok.put("ticketId", existingTicketId);
-                ok.put("message", "Device already received at shop.");
-                return ResponseEntity.ok(ok);
+                Map<String, Object> dup = new LinkedHashMap<>(pickupBookingController.handoverState(id));
+                dup.put("error", "Handover already confirmed.");
+                dup.put("code", "ALREADY_CONFIRMED");
+                return ResponseEntity.status(409).body(dup);
             }
             if (!"REACHED_SHOP".equalsIgnoreCase(currentStatus)) {
                 log.warn("receive-at-shop: bad state booking={} current={}", id, currentStatus);
@@ -116,18 +120,44 @@ public class ShopPickupBookingController {
                         "currentStatus", currentStatus == null ? "" : currentStatus));
             }
 
-            String staffName = PickupBookingController.firstNonBlank(
-                    PickupBookingController.value(body, "receivedByName"),
-                    PickupBookingController.value(body, "receivedByUserName"),
-                    pickupBookingController.lookupUserDisplayName(userId));
-            // TPIN-verified receiver (owner / shop / same-shop employee) wins over any
-            // client-supplied name: id + "Name (Role)" come from the consumed authorization.
-            var approver = tpinGuard.approver(request);
-            String approverLabel = tpinGuard.approverLabel(request);
-            if (approver != null && approver.userId() != null) {
-                userId = approver.userId();
-                staffName = approverLabel != null ? approverLabel : approver.name();
+            if (current.get("handover_requested_at") == null) {
+                return ResponseEntity.status(409).body(Map.of(
+                        "error", "The pickup person has not requested the shop handover yet.",
+                        "code", "HANDOVER_NOT_REQUESTED"));
             }
+
+            // Mandatory TPIN (even while TPIN_ENFORCED is off): the authorization from
+            // /auth/security/tpin/authorize (auto-identifies Owner / Shop / same-shop
+            // Employee) is consumed by TpinInterceptor before this handler runs.
+            UUID authId = request.getAttribute(TpinGuard.APPROVAL_ATTR) instanceof UUID u ? u : null;
+            if (authId == null) {
+                return ResponseEntity.status(403).body(Map.of("error", "TPIN confirmation is required.", "code", "TPIN_REQUIRED"));
+            }
+            Map<String, Object> actor = jdbc.queryForMap(
+                    "SELECT actor_type, actor_id, shop_id FROM auth_transaction_authorizations WHERE id = ?", authId);
+            String actorType = PickupBookingController.stringFrom(actor, "actor_type");
+            UUID actorId = UUID.fromString(PickupBookingController.stringFrom(actor, "actor_id"));
+            if (!bookingShopStr.equalsIgnoreCase(PickupBookingController.stringFrom(actor, "shop_id"))) {
+                throw new ResponseStatusException(org.springframework.http.HttpStatus.FORBIDDEN, "wrong shop");
+            }
+            String role = "EMPLOYEE".equals(actorType) ? "EMPLOYEE" : "SHOP_MOBILE".equals(actorType) ? "SHOP" : "OWNER";
+            boolean allowed = "EMPLOYEE".equals(role)
+                    ? Boolean.TRUE.equals(jdbc.query("SELECT is_active FROM users WHERE id = ? AND shop_id = CAST(? AS UUID)",
+                            rs -> rs.next() ? rs.getBoolean(1) : null, actorId, bookingShopStr))
+                    // Owner / Shop login: auth-service only issues these for this session's shop.
+                    : "SHOP_OWNER".equals(actorType) || "SHOP_MOBILE".equals(actorType);
+            if (!allowed) throw new ResponseStatusException(org.springframework.http.HttpStatus.FORBIDDEN, "not authorized for this shop");
+            // The pickup person can never confirm their own handover.
+            String pickupTech = PickupBookingController.stringFrom(current, "assigned_pickup_person_id");
+            if ("EMPLOYEE".equals(role) && pickupTech != null && actorId.toString().equalsIgnoreCase(jdbc.query(
+                    "SELECT CAST(user_id AS VARCHAR) FROM technicians WHERE id = CAST(? AS UUID)",
+                    rs -> rs.next() ? rs.getString(1) : null, pickupTech))) {
+                throw new ResponseStatusException(org.springframework.http.HttpStatus.FORBIDDEN,
+                        "The pickup person cannot confirm their own handover.");
+            }
+            String staffName = PickupBookingController.firstNonBlank(
+                    pickupBookingController.lookupUserDisplayName(actorId), "SHOP".equals(role) ? "Shop" : null);
+            userId = actorId; // the verified TPIN owner is the receiver of record
 
             log.info("receive-at-shop: BEFORE UPDATE booking={} shop={} staff={} name={}",
                     id, shopId, userId, staffName);
@@ -138,6 +168,7 @@ public class ShopPickupBookingController {
                                 "    received_at_shop_at = now(), " +
                                 "    received_by_user_id = CAST(? AS UUID), " +
                                 "    received_by_user_name = COALESCE(?, received_by_user_name), " +
+                                "    handover_verified_role = '" + role + "', " +
                                 "    updated_at = now() " +
                                 "WHERE id = CAST(? AS UUID) AND status = 'REACHED_SHOP'",
                         userId.toString(), staffName, id.toString());
@@ -156,11 +187,16 @@ public class ShopPickupBookingController {
                         "detail", e.getClass().getSimpleName() + ": " + e.getMessage()));
             }
             log.info("receive-at-shop: AFTER UPDATE booking={} -> RECEIVED_AT_SHOP", id);
+            // Audit history (booking_id UNIQUE → a second confirmation can never be recorded).
+            jdbc.update("INSERT INTO pickup_handover_audit (id, booking_id, booking_number, shop_id, pickup_employee_id, " +
+                            "verified_user_id, verified_user_name, verified_role, tpin_authorization_id, confirmed_at) " +
+                            "VALUES (?, ?, ?, CAST(? AS UUID), CAST(? AS UUID), ?, ?, ?, ?, now())",
+                    UUID.randomUUID(), id, bookingNumber, bookingShopStr,
+                    PickupBookingController.stringFrom(current, "assigned_pickup_person_id"), actorId, staffName, role, authId);
 
             try {
                 pickupBookingController.appendEvent(id, "RECEIVED_AT_SHOP",
-                        approver != null ? "Received by " + staffName + " · TPIN verified"
-                                : staffName != null ? "Received by " + staffName : "Device received at shop",
+                        "Handover confirmed by " + (staffName != null ? staffName : "shop") + " (" + role + ", TPIN)",
                         "SHOP_STAFF");
             } catch (Exception e) {
                 log.warn("receive-at-shop: event insert failed for {}: {}", id, e.getMessage());
@@ -211,12 +247,17 @@ public class ShopPickupBookingController {
             data.put("repairBookingId", id.toString());
             if (mintedTicketId != null) data.put("ticketId", mintedTicketId);
             if (staffName != null) data.put("receivedByName", staffName);
+            data.put("verifiedByName", staffName);
+            data.put("verifiedRole", role);
+            data.put("confirmedAt", java.time.Instant.now().toString());
 
             Map<String, Object> resp = new LinkedHashMap<>();
             resp.put("success", true);
             resp.put("message", "Pickup booking received at shop successfully");
             resp.put("data", data);
             return ResponseEntity.ok(resp);
+        } catch (ResponseStatusException e) {
+            throw e; // roll back (TPIN consumption included); status + reason reach the client
         } catch (Exception e) {
             log.error("receive-at-shop: UNHANDLED for booking={}: {}", id, e.getMessage(), e);
             return ResponseEntity.status(500).body(Map.of(
@@ -224,6 +265,57 @@ public class ShopPickupBookingController {
                     "error", e.getClass().getSimpleName(),
                     "message", e.getMessage() == null ? "internal error" : e.getMessage()));
         }
+    }
+
+    /**
+     * Shop receiver tapped "Confirm Device Received" (TPIN sheet opens next):
+     * the pickup person's app shows "Shop Confirmation in Progress". No state change.
+     */
+    @PostMapping("/{id}/handover-start")
+    @Operation(summary = "Shop started the device-received confirmation (before TPIN)")
+    public ResponseEntity<Map<String, Object>> handoverStart(HttpServletRequest request, @PathVariable UUID id) {
+        UUID shopId = readUuidAttr(request, "shopId");
+        if (shopId == null) return ResponseEntity.status(401).body(Map.of("error", "unauthorized"));
+        int n = jdbc.update("UPDATE repair_bookings SET handover_started_at = now() WHERE id = CAST(? AS UUID) " +
+                "AND shop_id = CAST(? AS UUID) AND status = 'REACHED_SHOP' AND handover_requested_at IS NOT NULL",
+                id.toString(), shopId.toString());
+        if (n == 0) return ResponseEntity.status(409).body(Map.of(
+                "error", "No pending handover request for this booking.", "code", "HANDOVER_NOT_PENDING"));
+        return ResponseEntity.ok(pickupBookingController.handoverState(id));
+    }
+
+    /** Partner App: devices waiting for this shop's TPIN handover confirmation. */
+    @GetMapping("/handover-pending")
+    @Operation(summary = "Pickup bookings waiting for shop handover confirmation")
+    public ResponseEntity<Object> handoverPending(HttpServletRequest request) {
+        UUID shopId = readUuidAttr(request, "shopId");
+        if (shopId == null) return ResponseEntity.status(401).body(Map.of("error", "unauthorized"));
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT rb.id, rb.booking_number, rb.handover_requested_at, rb.pickup_person_name, rb.color, rb.customer_name, " +
+                        "mb.name AS brand_name, mm.name AS model_name, s.name AS shop_name " +
+                        "FROM repair_bookings rb " +
+                        "LEFT JOIN master_models mm ON mm.id = rb.model_id " +
+                        "LEFT JOIN master_brands mb ON mb.id = rb.brand_id " +
+                        "LEFT JOIN shops s ON s.id = rb.shop_id " +
+                        "WHERE rb.shop_id = CAST(? AS UUID) AND rb.status = 'REACHED_SHOP' AND rb.handover_requested_at IS NOT NULL " +
+                        "ORDER BY rb.handover_requested_at DESC", shopId.toString());
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map<String, Object> r : rows) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("bookingId", PickupBookingController.stringFrom(r, "id"));
+            m.put("bookingNumber", PickupBookingController.stringFrom(r, "booking_number"));
+            String brand = PickupBookingController.stringFrom(r, "brand_name");
+            String model = PickupBookingController.stringFrom(r, "model_name");
+            m.put("device", PickupBookingController.firstNonBlank(
+                    ((brand == null ? "" : brand + " ") + (model == null ? "" : model)).trim(), "Device"));
+            m.put("color", PickupBookingController.stringFrom(r, "color"));
+            m.put("pickupPersonName", PickupBookingController.stringFrom(r, "pickup_person_name"));
+            m.put("customerName", PickupBookingController.stringFrom(r, "customer_name"));
+            m.put("shopName", PickupBookingController.stringFrom(r, "shop_name"));
+            m.put("requestedAt", PickupBookingController.iso(r.get("handover_requested_at")));
+            out.add(m);
+        }
+        return ResponseEntity.ok(out);
     }
 
     private static UUID readUuidAttr(HttpServletRequest request, String name) {

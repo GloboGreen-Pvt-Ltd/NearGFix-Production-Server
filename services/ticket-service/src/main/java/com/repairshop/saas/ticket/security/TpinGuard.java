@@ -75,7 +75,7 @@ public class TpinGuard {
         return ids.get(0);
     }
 
-    static final String APPROVAL_ATTR = "tpin.authorizationId";
+    public static final String APPROVAL_ATTR = "tpin.authorizationId";
 
     /**
      * Who approved this request with their TPIN (server-verified by auth-service:
