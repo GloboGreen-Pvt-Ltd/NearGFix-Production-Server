@@ -36,4 +36,6 @@ public class ListingView {
     private String status;
     private Instant createdAt;
     private Double distanceKm;   // computed by service
+    /** Seller display name — only for a signed-in shop viewer (never a phone number). */
+    private String sellerName;
 }

@@ -33,9 +33,13 @@ public class MarketplaceListingController {
             @RequestParam(value = "lng",        required = false) BigDecimal lng,
             @RequestParam(value = "radiusKm",   required = false, defaultValue = "20") double radiusKm,
             @RequestParam(value = "q",          required = false) String q,
-            @RequestParam(value = "excludeSellerId", required = false) UUID excludeSellerId
+            @RequestParam(value = "excludeSellerId", required = false) UUID excludeSellerId,
+            jakarta.servlet.http.HttpServletRequest request
     ) {
-        return service.findNearby(lat, lng, radiusKm, q, excludeSellerId);
+        // shopId is set by JwtAuthFilter only for a valid shop token; anonymous / customer callers get no seller names.
+        Object shop = request.getAttribute("shopId");
+        UUID viewerShopId = shop == null ? null : UUID.fromString(shop.toString());
+        return service.findNearby(lat, lng, radiusKm, q, excludeSellerId, viewerShopId);
     }
 
     @PostMapping("/listings")
