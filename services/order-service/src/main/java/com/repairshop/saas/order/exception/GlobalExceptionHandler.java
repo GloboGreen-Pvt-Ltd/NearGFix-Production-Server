@@ -72,6 +72,20 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * Keeps the status of a ResponseStatusException (e.g. TpinGuard: 403 TPIN_REQUIRED /
+     * "TPIN authorization invalid, expired or already used", 401 SESSION_REQUIRED) instead
+     * of the catch-all turning it into a 500. Same body shape as the other handlers.
+     */
+    @ExceptionHandler(org.springframework.web.server.ResponseStatusException.class)
+    public ResponseEntity<Map<String, String>> status(org.springframework.web.server.ResponseStatusException e, HttpServletRequest req) {
+        log.info("{} {} -> {} {}", req.getMethod(), req.getRequestURI(), e.getStatusCode().value(), e.getReason());
+        String reason = e.getReason() != null ? e.getReason() : e.getStatusCode().toString();
+        return ResponseEntity.status(e.getStatusCode()).body(Map.of(
+                "error", e.getStatusCode().is4xxClientError() ? "request_rejected" : "error",
+                "message", reason));
+    }
+
+    /**
      * Catch-all so an unexpected throw doesn't produce an opaque 500 with
      * no body. The stack trace is logged at ERROR so the operator can
      * actually diagnose the failure; the response carries the exception
