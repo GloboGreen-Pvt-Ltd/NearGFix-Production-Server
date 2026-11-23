@@ -188,6 +188,7 @@ ensure_env_file() {
   otp_fixed_test_code="${OTP_FIXED_TEST_CODE_ENABLED:-$(read_env_value OTP_FIXED_TEST_CODE_ENABLED)}"; otp_fixed_test_code="${otp_fixed_test_code:-false}"
   pin_pepper="${PIN_PEPPER:-$(read_env_value PIN_PEPPER)}"
   tpin_enforced="${TPIN_ENFORCED:-$(read_env_value TPIN_ENFORCED)}"; tpin_enforced="${tpin_enforced:-false}"
+  tpin_enforced_actions="${TPIN_ENFORCED_ACTIONS:-$(read_env_value TPIN_ENFORCED_ACTIONS)}"
   require_device_session="${REQUIRE_DEVICE_SESSION:-$(read_env_value REQUIRE_DEVICE_SESSION)}"; require_device_session="${require_device_session:-false}"
 
   sudo tee "$APP_DIR/.env" >/dev/null <<EOF
@@ -227,6 +228,7 @@ DEVICE_LIMIT_TEST_ACCOUNTS=$device_limit_test_accounts
 OTP_FIXED_TEST_CODE_ENABLED=$otp_fixed_test_code
 PIN_PEPPER=$pin_pepper
 TPIN_ENFORCED=$tpin_enforced
+TPIN_ENFORCED_ACTIONS=$tpin_enforced_actions
 REQUIRE_DEVICE_SESSION=$require_device_session
 JAVA_OPTS="-Xms64m -Xmx160m"
 SERVICES="$SERVICES_DEFAULT"
