@@ -260,6 +260,18 @@ class RepairDeliveryServiceTest {
     }
 
     @Test
+    void collectWithoutImeiIsAllowedButPhotosStillRequired() {
+        keys.add("QUALITY_CHECK_COMPLETED");
+        service.schedule(shopId, ticketId, slot(emp.getId()));
+        act("accept", null);
+        service.release(shopId, ticketId);
+        assertThrows(ResponseStatusException.class, () -> act("collect", Map.of("photos", List.of("https://a"))));
+        act("collect", Map.of("photos", List.of("https://a", "https://b")));
+        assertEquals("COLLECTED", saved.getStatus());
+        assertNull(saved.getCollectedIdentifier());
+    }
+
+    @Test
     void unauthorizedEmployeeAndCustomerAreRejected() {
         keys.add("QUALITY_CHECK_COMPLETED");
         service.schedule(shopId, ticketId, slot(emp.getId()));
