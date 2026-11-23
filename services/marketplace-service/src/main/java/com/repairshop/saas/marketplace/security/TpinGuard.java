@@ -32,11 +32,28 @@ public class TpinGuard {
     @Value("${app.security.tpin-enforced:false}")
     private boolean enforced;
 
+    /**
+     * Staged rollout: action types (e.g. BUY_ORDER) that require TPIN even while
+     * tpin-enforced=false, so critical actions can be enforced before the global switch.
+     */
+    private java.util.Set<String> enforcedActions = java.util.Set.of();
+
+    @Value("${app.security.tpin-enforced-actions:}")
+    void setEnforcedActions(String csv) {
+        enforcedActions = java.util.Arrays.stream(String.valueOf(csv).split(",")).map(String::trim)
+                .filter(s -> !s.isEmpty()).map(String::toUpperCase).collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
+    /** True when a request for this action must carry a TPIN authorization. */
+    public boolean required(String actionType) {
+        return enforced || (actionType != null && enforcedActions.contains(actionType.toUpperCase()));
+    }
+
     /** Returns the consumed authorization id, or null when not enforced and no header was sent. */
     public UUID consume(HttpServletRequest req, String actionType, String targetId, String contextHash) {
         String auth = req.getHeader(HEADER);
         if (auth == null || auth.isBlank()) {
-            if (enforced) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "TPIN_REQUIRED");
+            if (required(actionType)) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "TPIN_REQUIRED");
             return null;
         }
         String bearer = req.getHeader("Authorization");
