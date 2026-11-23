@@ -1,5 +1,6 @@
 package com.repairshop.saas.ticket.controller;
 
+import com.repairshop.saas.common.presence.PresenceAvailability;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -38,11 +39,12 @@ public class ShopPresenceController {
 
     static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     static final int MAX_ACCURACY_M = 75;        // worse readings never change inside/outside
-    static final int STALE_SECONDS = 300;        // owner view: no reading for 5 min → unverified
     static final int MAX_READING_AGE_S = 600;    // older readings are ignored
 
     private final JdbcTemplate jdbc;
     private final PlatformTransactionManager txManager;
+    /** Shared availability rules + duty lookup; its timeout (default 90 s) also marks stale presence. */
+    private final PresenceAvailability availability;
 
     // ------------------------------------------------------------ request models
 
@@ -128,7 +130,7 @@ public class ShopPresenceController {
 
         // Authorized duty from the assignment tables, outside the write transaction
         // (a failed lookup must not abort it). Unknown → treated as no duty.
-        String duty = bool(s, "dutyExemption") ? activeDuty(techId, userId) : null;
+        String duty = bool(s, "dutyExemption") ? availability.activeDuty(techId, userId) : null;
         UUID attId = (UUID) att.get("id");
         int radius = num(s, "radiusMeters");
         int grace = num(s, "graceSeconds");
@@ -154,8 +156,11 @@ public class ShopPresenceController {
                         + "WHERE technician_id = ?", shopId, attId, techId);
                 st = jdbc.queryForMap("SELECT * FROM employee_presence_state WHERE technician_id = ?", techId);
             }
+            // Last server contact (server clock): drives CONNECTION_LOST in availability.
+            jdbc.update("UPDATE employee_presence_state SET updated_at = ? WHERE technician_id = ?", Timestamp.from(now), techId);
             String state = String.valueOf(st.get("state"));
             Instant lastObs = ts(st.get("last_observed_at"));
+            Instant prevVerified = ts(st.get("last_verified_at"));
             boolean record = bool(s, "recordEvents");
 
             // Out-of-order / stale reading: report the current state, change nothing.
@@ -178,6 +183,23 @@ public class ShopPresenceController {
             jdbc.update("UPDATE employee_presence_state SET last_observed_at = ?, last_distance_m = ?, last_accuracy_m = ?, "
                             + "last_verified_at = CASE WHEN ? THEN ? ELSE last_verified_at END, updated_at = now() WHERE technician_id = ?",
                     Timestamp.from(obs), distance, acc, accurate, Timestamp.from(obs), techId);
+
+            // Recovery: first verified reading after a location error or a gap longer than the
+            // verification timeout. Records only that verification resumed (with the real gap);
+            // it never invents an inside / outside transition.
+            if (accurate && record) {
+                boolean gap = prevVerified != null && secs(prevVerified, obs) > availability.timeoutSeconds();
+                boolean afterError = false;
+                if ("LOCATION_UNVERIFIED".equals(state)) {
+                    Instant err = ts(jdbc.queryForObject("SELECT MAX(observed_at) FROM employee_presence_events WHERE technician_id = ? "
+                            + "AND attendance_id = ? AND event_type = 'LOCATION_UNVERIFIED'", Object.class, techId, attId));
+                    afterError = prevVerified == null || (err != null && prevVerified.isBefore(err));
+                }
+                if (gap || afterError) {
+                    event(techId, shopId, attId, "LOCATION_VERIFIED", obs, distance, acc, radius, null,
+                            prevVerified == null ? null : secs(prevVerified, obs), "SERVER");
+                }
+            }
 
             // Authorized duty: no freeze; close an open outside interval first.
             if (duty != null) {
@@ -300,6 +322,33 @@ public class ShopPresenceController {
         }
         d.put("recentDays", days);
         return d;
+    }
+
+    /**
+     * Assignment availability of the caller's shop employees (or one, via employeeId) — server-evaluated,
+     * server time. Read-only; the same rules gate assignment APIs when enforcement is enabled.
+     */
+    @GetMapping("/presence/availability")
+    public Map<String, Object> availability(HttpServletRequest req, @RequestParam(required = false) UUID employeeId) {
+        requireOwner(req);
+        UUID shopId = shop(req);
+        List<Map<String, Object>> techs = employeeId == null
+                ? jdbc.queryForList("SELECT id, name, role_label FROM technicians WHERE shop_id = ? ORDER BY name", shopId)
+                : jdbc.queryForList("SELECT id, name, role_label FROM technicians WHERE shop_id = ? AND (id = ? OR user_id = ?)", shopId, employeeId, employeeId);
+        if (employeeId != null && techs.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Employee not found");
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Map<String, Object> t : techs) {
+            Map<String, Object> m = availability.evaluate(shopId, (UUID) t.get("id")).toMap();
+            m.put("name", t.get("name"));
+            m.put("role", t.get("role_label"));
+            rows.add(m);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("serverTime", Instant.now().toString());
+        out.put("verificationTimeoutSeconds", availability.timeoutSeconds());
+        out.put("enforcementEnabled", availability.enforcementEnabled());
+        out.put("employees", rows);
+        return out;
     }
 
     @GetMapping("/presence/settings")
@@ -428,7 +477,7 @@ public class ShopPresenceController {
             presence = String.valueOf(st.get("state"));
             Instant lv = ts(st.get("last_verified_at"));
             // Never present an old reading as live presence (duty is server data, not GPS).
-            if (!"ON_AUTHORIZED_DUTY".equals(presence) && lv != null && lv.isBefore(Instant.now().minusSeconds(STALE_SECONDS))) {
+            if (!"ON_AUTHORIZED_DUTY".equals(presence) && lv != null && lv.isBefore(Instant.now().minusSeconds(availability.timeoutSeconds()))) {
                 d.put("stale", true);
                 if ("INSIDE_SHOP".equals(presence)) presence = "LOCATION_UNVERIFIED";
             }
@@ -447,10 +496,11 @@ public class ShopPresenceController {
         if (att != null && att.get("check_in_time") != null) {
             timeline.add(tl("CHECKED_IN", atIst(day, att.get("check_in_time")), null, null));
             for (Map<String, Object> e : jdbc.queryForList(
-                    "SELECT event_type, observed_at, duration_seconds, duty_ref, distance_m FROM employee_presence_events "
+                    "SELECT event_type, observed_at, duration_seconds, duty_ref, distance_m, radius_m FROM employee_presence_events "
                             + "WHERE technician_id = ? AND attendance_id = ? ORDER BY observed_at, received_at", t.get("id"), att.get("id"))) {
                 Map<String, Object> x = tl(String.valueOf(e.get("event_type")), ts(e.get("observed_at")), e.get("duration_seconds"), e.get("duty_ref"));
                 x.put("distanceMeters", e.get("distance_m"));
+                x.put("radiusMeters", e.get("radius_m")); // lets the graph place a LOCATION_VERIFIED recovery inside / outside
                 timeline.add(x);
             }
             if (att.get("check_out_time") != null) timeline.add(tl("CHECKED_OUT", atIst(day, att.get("check_out_time")), null, null));
@@ -501,33 +551,6 @@ public class ShopPresenceController {
         s.put("prolongedAlertMinutes", r.getOrDefault("prolonged_alert_minutes", 0));
         s.put("version", r.getOrDefault("version", 0));
         return s;
-    }
-
-    /** Active authorized field work, from server assignment data, or null. */
-    private String activeDuty(UUID techId, UUID userId) {
-        String[][] checks = {
-                {"REPAIR_PICKUP", "SELECT booking_number FROM repair_bookings WHERE assigned_pickup_person_id = ? AND UPPER(status) IN "
-                        + "('PICKUP_ON_THE_WAY','REACHED_CUSTOMER_LOCATION','REPAIR_ESTIMATE_PROCESSING','ESTIMATE_SUBMITTED','DEVICE_PICKED_UP','PICKED_UP','REACHED_SHOP') LIMIT 1"},
-                {"SELL_PICKUP", "SELECT sell_number FROM sell_orders WHERE assigned_pickup_person_id = ? AND UPPER(status) IN ('OUT_FOR_PICKUP','PICKED_UP') LIMIT 1"},
-        };
-        for (String[] c : checks) {
-            try {
-                List<String> r = jdbc.queryForList(c[1], String.class, techId);
-                if (!r.isEmpty()) return c[0] + ":" + (r.get(0) == null ? "" : r.get(0));
-            } catch (Exception e) {
-                log.debug("duty lookup {} failed: {}", c[0], e.getMessage());
-            }
-        }
-        if (userId != null) {
-            try {
-                List<String> r = jdbc.queryForList("SELECT CAST(id AS VARCHAR) FROM marketplace_orders WHERE assigned_staff_user_id = ? "
-                        + "AND UPPER(status) IN ('PICKED_UP','OUT_FOR_DELIVERY','DELIVERY_FAILED') LIMIT 1", String.class, userId);
-                if (!r.isEmpty()) return "MARKETPLACE_DELIVERY:" + r.get(0);
-            } catch (Exception e) {
-                log.debug("duty lookup marketplace failed: {}", e.getMessage());
-            }
-        }
-        return null;
     }
 
     private double[] shopCoords(UUID shopId) {
