@@ -53,6 +53,9 @@ public class TicketService {
 
     private final TicketRepository ticketRepository;
     private final TechnicianRepository technicianRepository;
+    /** Presence assignment gate (field-injected so the constructor stays unchanged; null-safe). */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.repairshop.saas.common.presence.PresenceAvailability presenceAvailability;
     private final PlatformRepairBookingRepository platformRepairBookingRepository;
     private final PlatformRepairBookingEventRepository platformRepairBookingEventRepository;
     private final PlatformCustomerAddressRepository platformCustomerAddressRepository;
@@ -957,6 +960,10 @@ public class TicketService {
                 if (!tech.getId().equals(technicianBeforePatch)
                         && !com.repairshop.saas.common.notify.EmployeeAttendance.isAssignable(jdbc, shopId, tech.getId())) {
                     throw new ResponseStatusException(HttpStatus.CONFLICT, com.repairshop.saas.common.notify.EmployeeAttendance.MESSAGE);
+                }
+                // Presence gate for a NEW assignee (no-op unless enforcement is enabled).
+                if (presenceAvailability != null && !tech.getId().equals(ticket.getAssignedTechnicianId())) {
+                    presenceAvailability.requireAssignable(shopId, tech.getId());
                 }
                 ticket.setAssignedTechnicianId(tech.getId());
                 assignedTechAfterPatch = tech;

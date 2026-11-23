@@ -39,6 +39,7 @@ public class FixedPriceOrderService {
     private static final Set<String> OPEN = Set.of("PLACED", "CONFIRMED", "ASSIGNED", "ACCEPTED", "PICKED_UP", "OUT_FOR_DELIVERY", "DELIVERY_FAILED");
 
     private final MarketplaceOrderRepository orders;
+    private final com.repairshop.saas.common.presence.PresenceAvailability presenceAvailability;
     private final MarketplaceOrderEventRepository events;
     private final MarketplaceProductRepository products;
     private final ObjectMapper json;
@@ -153,6 +154,7 @@ public class FixedPriceOrderService {
                 if (staff.equals(o.getAssignedStaffUserId()) && "ASSIGNED".equals(s)) return view(o, false);
                 require(o, "CONFIRMED", "ASSIGNED", "ACCEPTED", "DELIVERY_FAILED");
                 if (!isShopEmployee(staff, o.getShopId())) throw bad("Employee does not belong to this shop");
+                if (!staff.equals(o.getAssignedStaffUserId())) presenceAvailability.requireAssignable(o.getShopId(), staff); // no-op unless enforcement is enabled
                 boolean re = o.getAssignedStaffUserId() != null;
                 o.setAssignedStaffUserId(staff);
                 newPickupPin(o); // a new PIN per (re)assignment: an old one never works

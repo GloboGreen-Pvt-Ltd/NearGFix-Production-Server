@@ -1,5 +1,6 @@
 package com.repairshop.saas.ticket.controller;
 
+import com.repairshop.saas.common.presence.PresenceAvailability;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -40,7 +41,7 @@ class ShopPresenceControllerTest {
                 : new DriverManagerDataSource("jdbc:h2:mem:" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH", "sa", "");
         jdbc = new JdbcTemplate(ds);
         if (pg != null) for (String t : List.of("employee_presence_events", "employee_presence_state", "shop_presence_settings", "shops", "technicians",
-                "technician_attendance", "repair_bookings", "sell_orders", "marketplace_orders")) jdbc.execute("DROP TABLE IF EXISTS " + t);
+                "technician_attendance", "repair_bookings", "sell_orders", "marketplace_orders", "tickets")) jdbc.execute("DROP TABLE IF EXISTS " + t);
         jdbc.execute("CREATE TABLE shops (id UUID PRIMARY KEY, name VARCHAR(100), latitude DOUBLE PRECISION, longitude DOUBLE PRECISION)");
         jdbc.execute("CREATE TABLE technicians (id UUID PRIMARY KEY, shop_id UUID, user_id UUID, name VARCHAR(100), role_label VARCHAR(100))");
         jdbc.execute("CREATE TABLE technician_attendance (id UUID PRIMARY KEY, technician_id UUID, attendance_date DATE, check_in_time TIME, check_out_time TIME, status VARCHAR(50))");
@@ -55,7 +56,8 @@ class ShopPresenceControllerTest {
         shopId = UUID.randomUUID(); userId = UUID.randomUUID(); techId = UUID.randomUUID(); attId = UUID.randomUUID();
         jdbc.update("INSERT INTO shops VALUES (?, 'Globo Green', ?, ?)", shopId, LAT, LNG);
         jdbc.update("INSERT INTO technicians VALUES (?, ?, ?, 'Nivetha', 'Technician')", techId, shopId, userId);
-        c = new ShopPresenceController(jdbc, new DataSourceTransactionManager(ds));
+        jdbc.execute("CREATE TABLE tickets (id UUID, assigned_technician_id UUID, status VARCHAR(60))");
+        c = new ShopPresenceController(jdbc, new DataSourceTransactionManager(ds), new PresenceAvailability(jdbc, false, 90));
     }
 
     void checkIn() {
@@ -194,5 +196,114 @@ class ShopPresenceControllerTest {
         assertThrows(IllegalArgumentException.class, () -> c.putSettings(req(true, shopId),
                 new ShopPresenceController.SettingsRequest(null, null, 5, null, null, null, null, null)));
         assertEquals(50, c.getSettings(req(false, shopId)).get("radiusMeters"));
+    }
+
+    // ------------------------------------------------------------ availability (90 s timeout, enforcement flag)
+
+    PresenceAvailability enforcing() { return new PresenceAvailability(jdbc, true, 90); }
+    String avail() { return enforcing().evaluate(shopId, techId).status(); }
+
+    @Test
+    void offDutyWhenNotCheckedInOrCheckedOut() {
+        assertEquals("OFF_DUTY", avail());
+        checkIn();
+        jdbc.update("UPDATE technician_attendance SET check_out_time = ?", Time.valueOf(LocalTime.of(0, 0, 2)));
+        assertEquals("OFF_DUTY", avail());
+        assertThrows(PresenceAvailability.PresenceAssignmentException.class, () -> enforcing().requireAssignable(shopId, techId));
+    }
+
+    @Test
+    void checkInAloneIsNotAvailable() {
+        checkIn();
+        assertEquals("LOCATION_UNVERIFIED", avail(), "no verified reading yet");
+    }
+
+    @Test
+    void freshInsideIsAvailableAndBusyWithOpenJob() {
+        checkIn();
+        ping(10, 5, 5);
+        assertEquals("AVAILABLE", avail());
+        enforcing().requireAssignable(shopId, userId); // user id resolves to the same employee
+        jdbc.update("INSERT INTO tickets VALUES (?, ?, 'IN_PROGRESS')", UUID.randomUUID(), techId);
+        PresenceAvailability.Result r = enforcing().evaluate(shopId, techId);
+        assertEquals("BUSY", r.status());
+        assertTrue(r.assignable(), "queued work allowed as today");
+        assertEquals(1, r.activeJobs());
+    }
+
+    @Test
+    void staleReadingExpiresAfterTimeoutAsUnverifiedNotOutside() {
+        checkIn();
+        ping(10, 5, 100); // verified 100 s ago, server contact now
+        assertEquals("LOCATION_UNVERIFIED", avail());
+        jdbc.update("UPDATE employee_presence_state SET updated_at = ?", java.sql.Timestamp.from(Instant.now().minusSeconds(200)));
+        assertEquals("CONNECTION_LOST", avail());
+        assertEquals(0, events("EXITED"), "offline is never a confirmed exit");
+        assertEquals("LOCATION_UNVERIFIED", c.shopPresence(req(true, shopId), null).get("employees") instanceof List<?> l
+                ? ((Map<?, ?>) l.get(0)).get("presence") : null);
+    }
+
+    @Test
+    void graceIsVerifyingThenOutsideBlocks() {
+        checkIn();
+        ping(10, 5, 60); ping(150, 5, 30);
+        assertEquals("VERIFYING", avail());
+        ping(150, 5, 0);
+        ping(150, 5, -1); // not yet past grace: still verifying
+        jdbc.update("UPDATE employee_presence_state SET state = 'OUTSIDE_SHOP', pending_outside_since = NULL");
+        assertEquals("OUTSIDE_SHOP", avail());
+        assertThrows(PresenceAvailability.PresenceAssignmentException.class, () -> enforcing().requireAssignable(shopId, techId));
+        new PresenceAvailability(jdbc, false, 90).requireAssignable(shopId, techId); // flag OFF: never blocks
+    }
+
+    @Test
+    void activeFieldDutyIsOnDutyEvenWithoutFreshGps() {
+        checkIn();
+        jdbc.update("INSERT INTO sell_orders VALUES ('S1', ?, 'OUT_FOR_PICKUP')", techId);
+        PresenceAvailability.Result r = enforcing().evaluate(shopId, techId);
+        assertEquals("ON_DUTY", r.status());
+        assertTrue(r.assignable());
+        jdbc.update("UPDATE sell_orders SET status = 'COMPLETED'");
+        assertEquals("LOCATION_UNVERIFIED", avail(), "duty over: needs fresh verification, not assumed inside");
+    }
+
+    @Test
+    void monitoringDisabledKeepsExistingBehavior() {
+        checkIn();
+        c.putSettings(req(true, shopId), new ShopPresenceController.SettingsRequest(false, null, null, null, null, null, null, null));
+        assertEquals("MONITORING_OFF", avail());
+        enforcing().requireAssignable(shopId, techId);
+    }
+
+    @Test
+    void recoveryEventRecordedOnceAfterLocationError() {
+        checkIn();
+        ping(10, 5, 60);
+        c.ping(req(false, shopId), new ShopPresenceController.PingRequest(null, null, null, Instant.now().minusSeconds(40).toEpochMilli(), "GPS_OFF", null));
+        ping(10, 5, 20);
+        ping(10, 5, 5);
+        assertEquals(1, events("LOCATION_VERIFIED"));
+        assertEquals("AVAILABLE", avail());
+        assertEquals(0, events("RETURNED"), "recovery never fabricates a return");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> tl = (List<Map<String, Object>>) c.employeePresence(req(true, shopId), techId, null).get("timeline");
+        List<String> types = tl.stream().map(m -> String.valueOf(m.get("type"))).toList();
+        assertEquals(List.of("CHECKED_IN", "LOCATION_UNVERIFIED", "LOCATION_VERIFIED"), types, "server order");
+        Map<String, Object> rec = tl.get(2);
+        assertEquals(50, rec.get("radiusMeters"));
+        assertTrue(((Number) rec.get("distanceMeters")).intValue() <= 50);
+        assertTrue(((Number) rec.get("durationSeconds")).longValue() >= 35, "gap since the previous verified reading");
+    }
+
+    @Test
+    void availabilityEndpointIsOwnerOnlyAndShopScoped() {
+        checkIn();
+        assertThrows(ResponseStatusException.class, () -> c.availability(req(false, shopId), null));
+        assertThrows(ResponseStatusException.class, () -> c.availability(req(true, UUID.randomUUID()), techId));
+        Map<String, Object> r = c.availability(req(true, shopId), null);
+        assertEquals(1, ((List<?>) r.get("employees")).size());
+        assertEquals(false, r.get("enforcementEnabled"));
+        // Another shop's employee is unknown to the validator (call-site shop check decides).
+        enforcing().requireAssignable(UUID.randomUUID(), techId);
     }
 }

@@ -82,6 +82,7 @@ public class ShopPurchaseController {
                     + "WHERE s.shop_id = ? ";
 
     private final JdbcTemplate jdbc;
+    private final com.repairshop.saas.common.presence.PresenceAvailability presenceAvailability;
     private final SellOrderRepository sellRepo;
     private final CustomerOrderRepository customerOrderRepo;
     private final CustomerNotificationRepository notificationRepo;
@@ -190,6 +191,7 @@ public class ShopPurchaseController {
         }
         // Paid at the door: the employee who paid collects the device.
         if (cur.get("payout_recorded_at") != null) throw new ConflictException("The customer is already paid — the pickup can't be reassigned");
+        presenceAvailability.requireAssignable(shopId, body.technicianId()); // no-op unless enforcement is enabled
         // A new pickup person accepts afresh and verifies the customer's PIN again; the previous one loses access.
         // The doorstep inspection and any agreed price stay with the order.
         jdbc.update("UPDATE sell_orders SET assigned_pickup_person_id = ?, pickup_person_name = ?, pickup_person_phone = ?, "

@@ -44,6 +44,7 @@ public class RepairBookingController {
     private static final String ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
     private final RepairBookingRepository bookingRepo;
+    private final com.repairshop.saas.common.presence.PresenceAvailability presenceAvailability;
     private final RepairBookingServiceRepository serviceRepo;
     private final RepairBookingEventRepository eventRepo;
     private final CustomerOrderRepository customerOrderRepo;
@@ -447,6 +448,9 @@ public class RepairBookingController {
         RepairBooking b = bookingRepo.findById(id).orElseThrow(() -> new ResourceNotFoundException("Booking not found"));
         if (b.getShopId() == null || !b.getShopId().equals(shopId)) throw new ForbiddenException("Not your shop's booking");
         if (body == null || body.getPickupPersonId() == null) throw new IllegalArgumentException("pickupPersonId is required");
+        if (!body.getPickupPersonId().equals(b.getAssignedPickupPersonId())) {
+            presenceAvailability.requireAssignable(shopId, body.getPickupPersonId()); // no-op unless enforcement is enabled
+        }
         if (!body.getPickupPersonId().equals(b.getAssignedPickupPersonId())
                 && !com.repairshop.saas.common.notify.EmployeeAttendance.isAssignable(jdbc, shopId, body.getPickupPersonId())) {
             throw new com.repairshop.saas.order.exception.ConflictException(com.repairshop.saas.common.notify.EmployeeAttendance.MESSAGE);
