@@ -10,7 +10,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Service
@@ -20,6 +22,9 @@ public class MarketplaceListingService {
     private static final double EARTH_KM = 6371.0;
 
     private final MarketplaceListingRepository repo;
+    /** Seller display names for shop viewers (optional so existing constructions keep working). */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private ChatSnapshotService snapshots;
 
     @Transactional
     public void delete(UUID id) {
@@ -59,6 +64,38 @@ public class MarketplaceListingService {
      */
     @Transactional(readOnly = true)
     public List<ListingView> findNearby(BigDecimal lat, BigDecimal lng, double radiusKm, String q, UUID excludeSellerId) {
+        return findNearby(lat, lng, radiusKm, q, excludeSellerId, null);
+    }
+
+    /**
+     * Same feed; a signed-in shop viewer ({@code viewerShopId} from its token) also gets each
+     * seller's display name. Phone numbers are never part of this feed — the shop gets the
+     * customer's contact from the purchase order after its quote is accepted.
+     */
+    @Transactional(readOnly = true)
+    public List<ListingView> findNearby(BigDecimal lat, BigDecimal lng, double radiusKm, String q, UUID excludeSellerId, UUID viewerShopId) {
+        List<ListingView> views = nearbyViews(lat, lng, radiusKm, q, excludeSellerId);
+        if (viewerShopId != null && snapshots != null) {
+            Map<String, String> names = new HashMap<>();
+            for (ListingView v : views) v.setSellerName(names.computeIfAbsent(sellerKey(v), k -> sellerName(v)));
+        }
+        return views;
+    }
+
+    private static String sellerKey(ListingView v) {
+        return "CUSTOMER".equalsIgnoreCase(v.getSellerType()) ? "C:" + v.getSellerId() : "S:" + v.getShopId();
+    }
+
+    private String sellerName(ListingView v) {
+        try {
+            if ("CUSTOMER".equalsIgnoreCase(v.getSellerType())) return v.getSellerId() == null ? null : snapshots.loadCustomer(v.getSellerId()).name();
+            return v.getShopId() == null ? null : snapshots.loadShop(v.getShopId()).name();
+        } catch (Exception e) {
+            return null; // name is optional; the feed never fails on it
+        }
+    }
+
+    private List<ListingView> nearbyViews(BigDecimal lat, BigDecimal lng, double radiusKm, String q, UUID excludeSellerId) {
         List<MarketplaceListing> rows = repo.findByStatusAndQuery("AVAILABLE", q);
         final boolean hasOrigin = (lat != null && lng != null);
         final double oLat;
