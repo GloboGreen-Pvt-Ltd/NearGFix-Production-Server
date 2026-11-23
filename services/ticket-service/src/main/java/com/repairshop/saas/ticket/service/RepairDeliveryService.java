@@ -249,9 +249,11 @@ public class RepairDeliveryService {
                 requireStatus(d, "ACCEPTED");
                 if (d.getReleasedAt() == null) throw conflict("Ask the shop to release the device first.");
                 String identifier = str(b.get("identifier"));
-                if (identifier == null) throw conflict("Enter the device IMEI / serial number.");
-                Ticket t = tickets.findById(d.getTicketId()).orElseThrow();
-                if (!identifierMatches(t, identifier)) throw conflict("IMEI / serial doesn't match this booking's device.");
+                // IMEI / serial is optional at shop collection; when given it must still match the device.
+                if (identifier != null) {
+                    Ticket t = tickets.findById(d.getTicketId()).orElseThrow();
+                    if (!identifierMatches(t, identifier)) throw conflict("IMEI / serial doesn't match this booking's device.");
+                }
                 List<String> photos = urls(b.get("photos"));
                 if (photos.size() < MIN_COLLECT_PHOTOS) throw conflict("Take at least " + MIN_COLLECT_PHOTOS + " photos of the device.");
                 d.setCollectedIdentifier(identifier);
