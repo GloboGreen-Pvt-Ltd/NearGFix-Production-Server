@@ -72,8 +72,11 @@ public class TpinGuard {
                                AND s.revoked_at IS NULL AND s.otp_expires_at > now())
                    AND (a.actor_type <> 'EMPLOYEE' OR a.action_type IN ('CHECK_IN','CHECK_OUT') OR EXISTS (
                         SELECT 1 FROM technician_attendance ta JOIN technicians t ON t.id = ta.technician_id
-                         WHERE t.user_id = a.actor_id AND ta.check_in_at IS NOT NULL AND ta.check_out_at IS NULL
-                           AND ta.check_in_at > now() - interval '20 hours'))
+                         WHERE t.user_id = a.actor_id
+                           AND ((ta.check_in_at IS NOT NULL AND ta.check_out_at IS NULL AND ta.check_in_at > now() - interval '20 hours')
+                             -- Employee-app check-in writes only the date + TIME columns (same rule as auth-service / ticket-service).
+                             OR (ta.check_in_at IS NULL AND ta.check_in_time IS NOT NULL AND ta.check_out_time IS NULL
+                                 AND ta.attendance_date = (now() AT TIME ZONE coalesce((SELECT s.timezone FROM shops s WHERE s.id = t.shop_id), 'Asia/Kolkata'))::date))))
                    AND a.credential_version = (SELECT c.credential_version FROM auth_pin_credentials c
                         WHERE c.principal_type = a.actor_type AND c.principal_id = a.actor_id AND c.pin_type = 'TPIN'
                         ORDER BY c.updated_at DESC LIMIT 1)
