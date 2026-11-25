@@ -50,6 +50,19 @@ public class InvoiceRequest {
     private BigDecimal advancePaid;
     private BigDecimal netPayableAmount;
     private BigDecimal amountPaid;
+    /**
+     * Split payment (migration 128). When either is sent, amountPaid is
+     * cashAmount + upiAmount; each must be >= 0 and their sum must not exceed
+     * the net payable (400 otherwise). Older apps send only amountPaid.
+     */
+    private BigDecimal cashAmount;
+    private BigDecimal upiAmount;
+    /**
+     * Required (true) with cashAmount / upiAmount when a balance remains;
+     * otherwise 409 CREDIT_CONFIRMATION_REQUIRED. Ignored by the legacy
+     * amountPaid-only request, which still records credit without it.
+     */
+    private Boolean creditConfirmed;
     private BigDecimal creditAmount;
     private String paymentNote;
     private LocalDate paymentDate;

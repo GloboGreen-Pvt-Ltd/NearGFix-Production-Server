@@ -110,6 +110,16 @@ public class Invoice {
     @Builder.Default
     private BigDecimal amountPaid = BigDecimal.ZERO;
 
+    /** Split of amountPaid by method (migration 128). 0 / 0 = method not recorded. */
+    @Column(name = "cash_amount", nullable = false, precision = 14, scale = 2)
+    @Builder.Default
+    private BigDecimal cashAmount = BigDecimal.ZERO;
+
+    /** UPI the shop confirmed it received; not a payment-gateway result. */
+    @Column(name = "upi_amount", nullable = false, precision = 14, scale = 2)
+    @Builder.Default
+    private BigDecimal upiAmount = BigDecimal.ZERO;
+
     /** What the customer still owes — mirrored into the Cash Book, see below. */
     @Column(name = "credit_amount", nullable = false, precision = 14, scale = 2)
     @Builder.Default

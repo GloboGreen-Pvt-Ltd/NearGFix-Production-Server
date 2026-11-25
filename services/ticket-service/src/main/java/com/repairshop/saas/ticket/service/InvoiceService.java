@@ -18,6 +18,7 @@ import org.springframework.web.server.ResponseStatusException;
 import org.springframework.http.HttpStatus;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -185,13 +186,46 @@ public class InvoiceService {
      * than the bill (a re-estimate that came down) must read as "nothing owed",
      * not as a negative debt that would flip to the shop owing the customer.
      */
-    private static void applyPayment(Invoice inv, InvoiceRequest req) {
+    static void applyPayment(Invoice inv, InvoiceRequest req) {
         BigDecimal finalPayable = nz(inv.getFinalPayableAmount());
         BigDecimal advance = clampToRange(nz(req.getAdvancePaid()), finalPayable);
         BigDecimal net = finalPayable.subtract(advance).max(BigDecimal.ZERO);
-        BigDecimal paid = clampToRange(nz(req.getAmountPaid()), net);
+        BigDecimal cash = BigDecimal.ZERO;
+        BigDecimal upi = BigDecimal.ZERO;
+        BigDecimal paid;
+        if (req.getCashAmount() != null || req.getUpiAmount() != null) {
+            // Split payment: rejected, not clamped — a typo must not become a
+            // silently different receipt.
+            cash = nz(req.getCashAmount()).setScale(2, RoundingMode.HALF_UP);
+            upi = nz(req.getUpiAmount()).setScale(2, RoundingMode.HALF_UP);
+            if (cash.signum() < 0 || upi.signum() < 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Payment amounts cannot be negative");
+            }
+            // A payment saved before the split existed (method not recorded) is
+            // read from the stored row, never from the client, and carried as is:
+            // it is neither dropped nor re-labelled as cash or UPI.
+            BigDecimal legacy = legacyPaid(inv);
+            paid = legacy.add(cash).add(upi);
+            if (paid.compareTo(net.setScale(2, RoundingMode.HALF_UP)) > 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, legacy.signum() > 0
+                        ? "Payments (including ₹" + legacy.toPlainString() + " recorded earlier) cannot be more than the net payable amount"
+                        : "Cash + UPI cannot be more than the net payable amount");
+            }
+            // New flow: a balance becomes the customer's credit only when the
+            // owner explicitly confirmed it.
+            if (net.subtract(paid).signum() > 0 && !Boolean.TRUE.equals(req.getCreditConfirmed())) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "CREDIT_CONFIRMATION_REQUIRED: confirm the balance as customer credit");
+            }
+        } else {
+            // Legacy API (no cashAmount / upiAmount): unchanged — amountPaid is
+            // clamped and any balance becomes credit without a confirmation.
+            paid = clampToRange(nz(req.getAmountPaid()), net);
+        }
         BigDecimal credit = net.subtract(paid).max(BigDecimal.ZERO);
 
+        inv.setCashAmount(cash);
+        inv.setUpiAmount(upi);
         inv.setAdvancePaid(advance);
         inv.setNetPayableAmount(net);
         inv.setAmountPaid(paid);
@@ -287,8 +321,19 @@ public class InvoiceService {
      * is what the customer will be holding when they come back to argue about it;
      * the owner's own note follows so it isn't buried.
      */
+    /** Paid before the split existed: amountPaid not covered by cash + UPI. */
+    public static BigDecimal legacyPaid(Invoice inv) {
+        return nz(inv.getAmountPaid()).subtract(nz(inv.getCashAmount())).subtract(nz(inv.getUpiAmount()))
+                .max(BigDecimal.ZERO);
+    }
+
     private static String creditNote(Invoice inv) {
         String base = "Credit · Invoice #" + inv.getInvoiceNo();
+        // Audit trail on the Cash Book row: how the rest was paid.
+        if (nz(inv.getCashAmount()).signum() > 0) base += " · Cash ₹" + inv.getCashAmount().toPlainString();
+        if (nz(inv.getUpiAmount()).signum() > 0) base += " · UPI ₹" + inv.getUpiAmount().toPlainString();
+        BigDecimal legacy = legacyPaid(inv);
+        if (legacy.signum() > 0) base += " · Paid earlier ₹" + legacy.toPlainString();
         String own = trim(inv.getPaymentNote(), MAX_NOTE);
         String full = (own == null || own.isBlank()) ? base : base + " · " + own;
         return trim(full, MAX_NOTE);

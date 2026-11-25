@@ -39,6 +39,10 @@ public class InvoiceResponse {
     private BigDecimal advancePaid;
     private BigDecimal netPayableAmount;
     private BigDecimal amountPaid;
+    private BigDecimal cashAmount;
+    private BigDecimal upiAmount;
+    /** Paid before the split existed (method not recorded); part of amountPaid. */
+    private BigDecimal legacyPaidAmount;
     private BigDecimal creditAmount;
     private String paymentNote;
     private LocalDate paymentDate;
@@ -81,6 +85,9 @@ public class InvoiceResponse {
         r.advancePaid = inv.getAdvancePaid();
         r.netPayableAmount = inv.getNetPayableAmount();
         r.amountPaid = inv.getAmountPaid();
+        r.cashAmount = inv.getCashAmount();
+        r.upiAmount = inv.getUpiAmount();
+        r.legacyPaidAmount = com.repairshop.saas.ticket.service.InvoiceService.legacyPaid(inv);
         r.creditAmount = inv.getCreditAmount();
         r.paymentNote = inv.getPaymentNote();
         r.paymentDate = inv.getPaymentDate();
