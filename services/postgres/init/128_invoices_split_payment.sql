@@ -1,5 +1,5 @@
 -- =============================================================================
--- 120_invoices_split_payment.sql
+-- 128_invoices_split_payment.sql
 --
 -- A customer can pay one invoice partly in cash and partly by UPI. amount_paid
 -- (migration 89) stays the total handed over now; these two record how it was

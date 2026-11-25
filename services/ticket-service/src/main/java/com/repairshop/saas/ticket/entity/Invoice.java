@@ -110,7 +110,7 @@ public class Invoice {
     @Builder.Default
     private BigDecimal amountPaid = BigDecimal.ZERO;
 
-    /** Split of amountPaid by method (migration 120). 0 / 0 = method not recorded. */
+    /** Split of amountPaid by method (migration 128). 0 / 0 = method not recorded. */
     @Column(name = "cash_amount", nullable = false, precision = 14, scale = 2)
     @Builder.Default
     private BigDecimal cashAmount = BigDecimal.ZERO;
