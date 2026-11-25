@@ -185,13 +185,32 @@ public class InvoiceService {
      * than the bill (a re-estimate that came down) must read as "nothing owed",
      * not as a negative debt that would flip to the shop owing the customer.
      */
-    private static void applyPayment(Invoice inv, InvoiceRequest req) {
+    static void applyPayment(Invoice inv, InvoiceRequest req) {
         BigDecimal finalPayable = nz(inv.getFinalPayableAmount());
         BigDecimal advance = clampToRange(nz(req.getAdvancePaid()), finalPayable);
         BigDecimal net = finalPayable.subtract(advance).max(BigDecimal.ZERO);
-        BigDecimal paid = clampToRange(nz(req.getAmountPaid()), net);
+        BigDecimal cash = BigDecimal.ZERO;
+        BigDecimal upi = BigDecimal.ZERO;
+        BigDecimal paid;
+        if (req.getCashAmount() != null || req.getUpiAmount() != null) {
+            // Split payment: rejected, not clamped — a typo must not become a
+            // silently different receipt.
+            cash = nz(req.getCashAmount()).setScale(2, java.math.RoundingMode.HALF_UP);
+            upi = nz(req.getUpiAmount()).setScale(2, java.math.RoundingMode.HALF_UP);
+            if (cash.signum() < 0 || upi.signum() < 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Payment amounts cannot be negative");
+            }
+            paid = cash.add(upi);
+            if (paid.compareTo(net.setScale(2, java.math.RoundingMode.HALF_UP)) > 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Cash + UPI cannot be more than the net payable amount");
+            }
+        } else {
+            paid = clampToRange(nz(req.getAmountPaid()), net);
+        }
         BigDecimal credit = net.subtract(paid).max(BigDecimal.ZERO);
 
+        inv.setCashAmount(cash);
+        inv.setUpiAmount(upi);
         inv.setAdvancePaid(advance);
         inv.setNetPayableAmount(net);
         inv.setAmountPaid(paid);

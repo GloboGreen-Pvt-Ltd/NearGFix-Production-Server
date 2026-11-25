@@ -50,6 +50,13 @@ public class InvoiceRequest {
     private BigDecimal advancePaid;
     private BigDecimal netPayableAmount;
     private BigDecimal amountPaid;
+    /**
+     * Split payment (migration 120). When either is sent, amountPaid is
+     * cashAmount + upiAmount; each must be >= 0 and their sum must not exceed
+     * the net payable (400 otherwise). Older apps send only amountPaid.
+     */
+    private BigDecimal cashAmount;
+    private BigDecimal upiAmount;
     private BigDecimal creditAmount;
     private String paymentNote;
     private LocalDate paymentDate;
