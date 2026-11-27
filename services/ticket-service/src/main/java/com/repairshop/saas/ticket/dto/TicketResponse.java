@@ -100,6 +100,14 @@ public class TicketResponse {
     @Schema(description = "When the payment was recorded (server-stamped); null when nothing was collected")
     private Instant paymentPaidAt;
 
+    // Re-Service chain (all null on an original service).
+    private UUID parentTicketId;
+    private UUID rootTicketId;
+    private Integer serviceCycleNo;
+    private String serviceType;
+    private String returnReason;
+    private String reServiceNotes;
+
     @Schema(description = "Issue description")
     private String issueDescription;
 

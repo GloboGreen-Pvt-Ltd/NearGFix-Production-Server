@@ -130,4 +130,21 @@ public class TicketRequest {
     @Schema(description = "Create only: the customer agreed to receive the booking confirmation on WhatsApp. " +
             "Absent / false = no WhatsApp message (older app builds).")
     private Boolean whatsappOptIn;
+
+    // ── Re-Service (create only) ──────────────────────────────────────────────
+    @Schema(description = "Create only: id of the DELIVERED service this Re-Service follows. A new linked " +
+            "ticket (GTS-231-R01 …) is created; the delivered ticket is never changed.")
+    private UUID reServiceOf;
+
+    @Schema(description = "Re-Service type: WARRANTY | PAID | FREE_REWORK")
+    private String serviceType;
+
+    @Schema(description = "Return reason: SAME_ISSUE | NEW_ISSUE | NOT_RESOLVED | REPEATED | OTHER")
+    private String returnReason;
+
+    @Schema(description = "JSON: complaint, condition, inspectionNotes, remarks")
+    private String reServiceNotes;
+
+    @Schema(description = "Client idempotency key; a retry with the same key returns the same Re-Service")
+    private String reServiceRequestId;
 }

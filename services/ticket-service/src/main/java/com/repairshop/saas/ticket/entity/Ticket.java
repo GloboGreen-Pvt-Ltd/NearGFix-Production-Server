@@ -243,6 +243,28 @@ public class Ticket {
     @Column(name = "booked_at")
     private Instant bookedAt;
 
+    // Re-Service chain (migration 129). All NULL on an original service.
+    @Column(name = "parent_ticket_id")
+    private UUID parentTicketId;
+
+    @Column(name = "root_ticket_id")
+    private UUID rootTicketId;
+
+    @Column(name = "service_cycle_no")
+    private Integer serviceCycleNo;
+
+    @Column(name = "service_type", length = 20)
+    private String serviceType;
+
+    @Column(name = "return_reason", length = 30)
+    private String returnReason;
+
+    @Column(name = "re_service_notes", columnDefinition = "TEXT")
+    private String reServiceNotes;
+
+    @Column(name = "re_service_request_id", length = 64)
+    private String reServiceRequestId;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 

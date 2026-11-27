@@ -77,11 +77,23 @@ class TicketServiceEditStatusTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"CREATED", "IN_DIAGNOSIS", "APPROVED", "IN_REPAIR", "READY", "DELIVERED"})
+    @ValueSource(strings = {"CREATED", "IN_DIAGNOSIS", "APPROVED", "IN_REPAIR", "READY"})
     void editWithChangedServicesKeepsStatus(String status) {
         ticket.setStatus(status);
         service.update(shopId, ticketId, request(NEW_ITEMS, "2400", true, false));
         assertEquals(status, ticket.getStatus());
+    }
+
+    @Test
+    void deliveredServiceIsReadOnly() {
+        // A returning device gets a linked Re-Service ticket; the delivered one never changes.
+        ticket.setStatus("DELIVERED");
+        ticket.setPriceItemsJson(OLD_ITEMS);
+        var e = org.junit.jupiter.api.Assertions.assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                () -> service.update(shopId, ticketId, request(NEW_ITEMS, "2400", true, false)));
+        assertEquals(409, e.getStatusCode().value());
+        assertEquals("DELIVERED", ticket.getStatus());
+        assertEquals(OLD_ITEMS, ticket.getPriceItemsJson());
     }
 
     @Test
