@@ -41,6 +41,35 @@ public class TicketController {
     private final com.repairshop.saas.ticket.service.OwnerTechnicianService ownerTechnician;
     private final com.repairshop.saas.ticket.security.BookingPinVerifier bookingPinVerifier;
     private final com.repairshop.saas.ticket.security.TpinGuard tpinGuard;
+    private final com.repairshop.saas.ticket.service.ReServiceLinkService reServiceLinks;
+    private final com.repairshop.saas.ticket.service.ServiceStatusReportService statusReport;
+
+    @GetMapping("/status-report")
+    @Operation(summary = "Service Status: one current-status bucket per service record + visit summary (kind / booking-date filters)")
+    public Map<String, Object> statusReport(@RequestParam(required = false) String kind,
+                                            @RequestParam(required = false) String from,
+                                            @RequestParam(required = false) String to,
+                                            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return statusReport.summary(shopId, com.repairshop.saas.ticket.service.ServiceStatusReportService.filter(kind, from, to));
+    }
+
+    @GetMapping("/status-report/list")
+    @Operation(summary = "Service Status card list (server-paged; total = the card's count). bucket = card key, ACTIVE or ALL")
+    public org.springframework.data.domain.Page<TicketResponse> statusReportList(@RequestParam String bucket,
+                                                                               @RequestParam(required = false) String kind,
+                                                                               @RequestParam(required = false) String from,
+                                                                               @RequestParam(required = false) String to,
+                                                                               @RequestParam(required = false) String q,
+                                                                               @RequestParam(defaultValue = "0") int page,
+                                                                               @RequestParam(defaultValue = "20") int size,
+                                                                               HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return statusReport.list(shopId, bucket,
+                com.repairshop.saas.ticket.service.ServiceStatusReportService.filter(kind, from, to), q, page, size);
+    }
 
     private UUID shopIdFrom(HttpServletRequest request) {
         String sid = (String) request.getAttribute("shopId");
@@ -131,6 +160,14 @@ public class TicketController {
         if (shopId == null) throw new IllegalStateException("Missing shop context");
         reconcileQuietly(shopId, id);
         return ticketService.getEventsForShop(shopId, id);
+    }
+
+    @GetMapping("/{id}/service-records")
+    @Operation(summary = "Re-Service chain of a ticket: original + every linked Re-Service, with each one's invoice")
+    public List<Map<String, Object>> serviceRecords(@PathVariable UUID id, HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return reServiceLinks.serviceRecords(shopId, id);
     }
 
     @SuppressWarnings("unchecked")
@@ -240,6 +277,7 @@ public class TicketController {
             HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
+        ticketService.requireManualStatusAllowed(shopId, id, status);
         ticketService.updateStatus(shopId, id, status, ownerActorFrom(request));
     }
 

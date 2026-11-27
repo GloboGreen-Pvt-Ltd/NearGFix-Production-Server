@@ -123,7 +123,7 @@ class ReEstimateWorkflowServiceTest {
                 mock(PlatformCustomerAddressRepository.class), mock(PlatformCustomerUserRepository.class),
                 mock(RepairNoteRepository.class), mock(TicketSolutionPackRepository.class),
                 mock(MasterTechnicianWorkStatusViewRepository.class), mock(InvoiceRepository.class),
-                mirror, mock(TicketNumberService.class), workflow,
+                mirror, mock(TicketNumberService.class), mock(ReServiceLinkService.class), workflow,
                 mock(com.repairshop.saas.common.notify.ShopPushService.class),
                 mock(com.repairshop.saas.common.notify.PushService.class),
                 // Attendance check: every employee counts as checked in for these workflow tests.

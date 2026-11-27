@@ -18,6 +18,11 @@ public interface TicketRepository extends JpaRepository<Ticket, UUID> {
 
     Optional<Ticket> findByShopIdAndId(UUID shopId, UUID id);
 
+    // Re-Service chain (migration 129).
+    Optional<Ticket> findFirstByShopIdAndParentTicketId(UUID shopId, UUID parentTicketId);
+
+    List<Ticket> findByShopIdAndRootTicketIdOrderByServiceCycleNoAsc(UUID shopId, UUID rootTicketId);
+
     /** Row-locked read — serialises concurrent (re)assignments of one ticket. */
     @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT t FROM Ticket t WHERE t.shopId = :shopId AND t.id = :id")

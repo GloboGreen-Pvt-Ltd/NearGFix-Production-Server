@@ -43,15 +43,22 @@ public class InvoiceController {
     public InvoiceResponse upsert(@PathVariable UUID ticketId,
                                   @RequestBody InvoiceRequest body,
                                   HttpServletRequest request) {
-        return invoiceService.upsert(ticketId, body, userIdFrom(request));
+        return invoiceService.upsert(ticketId, body, userIdFrom(request), shopIdFrom(request));
     }
 
     @Operation(summary = "Get the invoice snapshot for a ticket")
     @GetMapping
-    public ResponseEntity<InvoiceResponse> getByTicket(@PathVariable UUID ticketId) {
-        return invoiceService.findByTicket(ticketId)
+    public ResponseEntity<InvoiceResponse> getByTicket(@PathVariable UUID ticketId, HttpServletRequest request) {
+        return invoiceService.findByTicket(ticketId, shopIdFrom(request))
                 .map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.notFound().build());
+    }
+
+    /** Shop of the caller's token; required — invoices are shop data. */
+    private static UUID shopIdFrom(HttpServletRequest request) {
+        Object sid = request.getAttribute("shopId");
+        if (sid == null || String.valueOf(sid).isBlank()) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Missing shop context");
+        return UUID.fromString(String.valueOf(sid));
     }
 
     @Operation(summary = "Delete the invoice for a ticket (only before Out for Delivery)")

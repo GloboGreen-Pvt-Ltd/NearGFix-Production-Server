@@ -66,6 +66,7 @@ public class TicketService {
     private final InvoiceRepository invoiceRepository;
     private final CustomerOrderMirrorService customerOrderMirrorService;
     private final TicketNumberService ticketNumberService;
+    private final ReServiceLinkService reServiceLinks;
     private final ReEstimateWorkflowService reEstimateWorkflow;
     private final com.repairshop.saas.common.notify.ShopPushService shopPush;
     private final com.repairshop.saas.common.notify.PushService pushService;
@@ -314,9 +315,15 @@ public class TicketService {
 
     @Transactional
     public TicketResponse create(UUID shopId, TicketRequest request) {
+        // Re-Service: a NEW ticket linked to the delivered one (GTS-231-R01);
+        // the delivered ticket is never touched. A retry returns the first result.
+        ReServiceLinkService.Prepared reService = request.getReServiceOf() != null
+                ? reServiceLinks.prepare(shopId, request) : null;
+        if (reService != null && reService.existing() != null) return toResponse(reService.existing());
         // Single device -> GTS-001; first of several -> GTS-001-A; a device
         // added to an existing booking -> that booking's next suffix.
-        TicketNumberService.Assigned number = request.getBookingNumber() != null && !request.getBookingNumber().isBlank()
+        TicketNumberService.Assigned number = reService != null ? reService.number()
+                : request.getBookingNumber() != null && !request.getBookingNumber().isBlank()
                 ? ticketNumberService.nextInBooking(shopId, request.getBookingNumber(), request.getCustomerId())
                 : ticketNumberService.next(shopId, Boolean.TRUE.equals(request.getMultiDevice()));
         Ticket ticket = Ticket.builder()
@@ -352,6 +359,7 @@ public class TicketService {
                 .deviceSuffix(number.deviceSuffix())
                 .status("CREATED")
                 .build();
+        if (reService != null) reServiceLinks.apply(ticket, reService, request);
         // After the builder, not inside it: the payment block is derived from
         // the prices set above (balance, and the guard that refuses an amount
         // over the bill), so it needs the ticket assembled first.
@@ -371,6 +379,7 @@ public class TicketService {
     public TicketResponse update(UUID shopId, UUID id, TicketRequest request) {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
+        requireOpenService(ticket);
         // Snapshot the prior approval + estimate state. A re-edit can change
         // priceItemsJson / estimatedPrice (= service re-estimated) or flip
         // customerApproval; both feed the Service History timeline.
@@ -496,6 +505,7 @@ public class TicketService {
     public TicketResponse reEstimate(UUID shopId, UUID id, com.repairshop.saas.ticket.dto.ReEstimateRequest req, UUID submittedBy) {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
+        requireOpenService(ticket);
         if (hasCurrentInvoice(ticket.getId())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Invoice already generated — delete the invoice before re-estimating");
         }
@@ -663,6 +673,7 @@ public class TicketService {
     public TicketResponse revisePrices(UUID shopId, UUID id, com.repairshop.saas.ticket.dto.PriceRevisionRequest req) {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
+        requireOpenService(ticket);
         if (hasCurrentInvoice(ticket.getId())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Invoice already generated — revise the price on the invoice");
         }
@@ -775,6 +786,8 @@ public class TicketService {
     public void updateStatus(UUID shopId, UUID id, String status, String actor) {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
+        // A delivered service never moves again (repeat calls with DELIVERED are a no-op change).
+        if (!"DELIVERED".equalsIgnoreCase(status)) requireOpenService(ticket);
         reEstimateWorkflow.onProgressStep(ticket, status);
         ticket.setStatus(status);
         ticket = ticketRepository.save(ticket);
@@ -782,40 +795,78 @@ public class TicketService {
         emitStepEventsForTicketStatus(ticket.getId(), status, actor);
     }
 
-    /**
-     * Re-Service: a delivered device is back, so the SAME ticket reopens for a
-     * new repair. Status returns to CREATED and the per-repair state (technician,
-     * acceptance, final price, approval) is cleared; the app's re-service wizard
-     * then PUTs the new issue / services / payment. A RE_SERVICE marker row
-     * starts a fresh step cycle: the first repair's rows stay in the table but
-     * the shop's timeline and step checks only see the new cycle
-     * (findCurrentCycle).
-     */
-    @Transactional
-    public TicketResponse reopen(UUID shopId, UUID id) {
-        Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
-                .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
-        if (!"DELIVERED".equalsIgnoreCase(ticket.getStatus())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "Only a delivered booking can be re-serviced.");
+    /** Full responses for these ids, in this order, this shop only (report lists). */
+    @Transactional(readOnly = true)
+    public List<TicketResponse> responsesFor(UUID shopId, List<UUID> ids) {
+        if (ids == null || ids.isEmpty()) return List.of();
+        Map<UUID, Ticket> byId = new HashMap<>();
+        ticketRepository.findAllById(ids).forEach(t -> { if (shopId.equals(t.getShopId())) byId.put(t.getId(), t); });
+        List<TicketResponse> out = new ArrayList<>();
+        for (UUID id : ids) {
+            Ticket t = byId.get(id);
+            if (t != null) out.add(toResponse(t));
         }
-        ticket.setStatus("CREATED");
-        ticket.setAssignedTechnicianId(null);
-        ticket.setTechnicianAcceptedAt(null);
-        ticket.setFinalPrice(null);
-        ticket.setCustomerApproval(null);
-        // The new repair records its own first delivery promise (re-estimate keeps it).
-        ticket.setOriginalEstimatedDeliveryAt(null);
-        ticket = ticketRepository.save(ticket);
-        customerOrderMirrorService.mirrorOnUpsert(ticket);
-        platformRepairBookingRepository.findByTicketId(ticket.getId()).ifPresent(booking ->
-                platformRepairBookingEventRepository.save(PlatformRepairBookingEvent.builder()
-                        .bookingId(booking.getId())
-                        .status(PlatformRepairBookingEventRepository.RE_SERVICE)
-                        .note("Re-Service — booking reopened")
-                        .actor("SHOP")
-                        .build()));
-        return toResponse(ticket);
+        return out;
+    }
+
+    /** Doorstep delivery states where the device is with the employee, not in the shop. */
+    private static final Set<String> DEVICE_OUT_FOR_DELIVERY = Set.of("COLLECTED", "OUT_FOR_DELIVERY", "ARRIVED", "RETURNING");
+    private static final Set<String> READY_TO_DELIVER = Set.of("READY", "INVOICE_GENERATED", "INVOICE_READY", "DELIVERED_PROCESSING");
+
+    /**
+     * A delivered service is a closed record. Edit, Re-Estimate, Price Revised,
+     * Reschedule / technician changes, acceptance and status changes are refused;
+     * a returning device gets a new linked Re-Service ticket instead. Invoice
+     * payment settlement / Confirm Credit (InvoiceService) stays allowed.
+     */
+    static void requireOpenService(Ticket t) {
+        if ("DELIVERED".equalsIgnoreCase(t.getStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "This service has been delivered and is read-only. Use Re-Service for a new repair.");
+        }
+    }
+
+    /**
+     * Owner "Update Status" (PATCH /tickets/{id}/status) may not skip the
+     * workflow. Delivered needs a finished repair (Ready / Invoice / Delivery
+     * Processing) and, while the device is out with a delivery employee, the
+     * customer's OTP hand-over (RepairDeliveryService "complete") — which calls
+     * updateStatus itself, not this check.
+     */
+    @Transactional(readOnly = true)
+    public void requireManualStatusAllowed(UUID shopId, UUID id, String status) {
+        Ticket t = ticketRepository.findByShopIdAndId(shopId, id)
+                .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
+        requireOpenService(t);
+        if (!"DELIVERED".equalsIgnoreCase(status == null ? "" : status.trim())) return;
+        if (!READY_TO_DELIVER.contains(String.valueOf(t.getStatus()).toUpperCase(java.util.Locale.ROOT))) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Finish the repair and quality check before marking this service delivered.");
+        }
+        List<String> out = jdbc.queryForList("SELECT status FROM repair_deliveries WHERE ticket_id = ?", String.class, id);
+        if (out.stream().anyMatch(s -> DEVICE_OUT_FOR_DELIVERY.contains(String.valueOf(s).toUpperCase(java.util.Locale.ROOT)))) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "This device is out for doorstep delivery. Complete the delivery with the customer's OTP.");
+        }
+    }
+
+    /**
+     * Legacy Re-Service (POST /tickets/{id}/reopen) — RETIRED. It reset the
+     * delivered ticket to CREATED and the app then wrote the new repair over its
+     * complaint, estimate, payment, photos, invoice and delivery. Re-Service now
+     * creates a linked ticket (POST /tickets with reServiceOf, see
+     * {@link ReServiceLinkService}); nothing may reopen a delivered service.
+     * Older app builds still call this — they get a clear "update the app"
+     * refusal and the delivered service stays untouched. Re-Service is its only
+     * caller (Partner App, plus an unused owner-screen copy in the Customer App).
+     * Tickets reopened before this change keep their RE_SERVICE marker rows;
+     * findCurrentCycle still reads them.
+     */
+    public TicketResponse reopen(UUID shopId, UUID id) {
+        ticketRepository.findByShopIdAndId(shopId, id)
+                .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
+        throw new ResponseStatusException(HttpStatus.GONE,
+                "Re-Service now creates a new linked service record. Please update the NearGFix Partner app to continue.");
     }
 
     /**
@@ -845,6 +896,7 @@ public class TicketService {
         Ticket ticket = (assigning ? ticketRepository.lockByShopIdAndId(shopId, id)
                         : ticketRepository.findByShopIdAndId(shopId, id))
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
+        requireOpenService(ticket);
 
         UUID technicianBeforePatch = ticket.getAssignedTechnicianId();
         boolean wasApprovedBeforePatch = Boolean.TRUE.equals(ticket.getCustomerApproval());
@@ -1247,6 +1299,7 @@ public class TicketService {
     public TicketResponse acceptByTechnician(UUID shopId, UUID userId, UUID ticketId) {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, ticketId)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + ticketId));
+        requireOpenService(ticket);
         if (ticket.getAssignedTechnicianId() == null) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "ticket has no assigned technician");
         }
@@ -2095,6 +2148,12 @@ public class TicketService {
                         ? t.getPaymentStatus()
                         : (t.getPaymentAmount() != null ? "PAID" : "PENDING"))
                 .paymentPaidAt(t.getPaymentPaidAt())
+                .parentTicketId(t.getParentTicketId())
+                .rootTicketId(t.getRootTicketId())
+                .serviceCycleNo(t.getServiceCycleNo())
+                .serviceType(t.getServiceType())
+                .returnReason(t.getReturnReason())
+                .reServiceNotes(t.getReServiceNotes())
                 .issueDescription(t.getIssueDescription())
                 .issueAudioUrl(t.getIssueAudioUrl())
                 .createdAt(t.getCreatedAt())

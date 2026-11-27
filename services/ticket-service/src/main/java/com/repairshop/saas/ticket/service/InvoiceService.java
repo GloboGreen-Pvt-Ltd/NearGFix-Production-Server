@@ -60,8 +60,25 @@ public class InvoiceService {
 
     @Transactional
     public InvoiceResponse upsert(UUID ticketId, InvoiceRequest req, UUID generatedBy) {
+        return upsert(ticketId, req, generatedBy, null);
+    }
+
+    /**
+     * callerShopId (from the token) scopes the ticket: another shop's ticket is
+     * "not found". null only for internal callers that already checked the shop.
+     * A delivered service's existing invoice is final — regenerating it would
+     * rewrite a completed bill (and its Cash Book credit); a returning device
+     * gets its own Re-Service ticket and invoice instead.
+     */
+    @Transactional
+    public InvoiceResponse upsert(UUID ticketId, InvoiceRequest req, UUID generatedBy, UUID callerShopId) {
         Ticket ticket = ticketRepository.findById(ticketId)
+                .filter(t -> callerShopId == null || callerShopId.equals(t.getShopId()))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Ticket not found"));
+        if ("DELIVERED".equalsIgnoreCase(ticket.getStatus()) && invoiceRepository.findByTicketId(ticketId).isPresent()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "This service has been delivered — its invoice is final and can't be generated again.");
+        }
         // No bill while a re-estimate is open — the price isn't settled yet (409 REESTIMATE_PENDING).
         reEstimateWorkflow.assertNoOpenRevision(ticket);
 
@@ -160,6 +177,13 @@ public class InvoiceService {
     @Transactional(readOnly = true)
     public Optional<InvoiceResponse> findByTicket(UUID ticketId) {
         return invoiceRepository.findByTicketId(ticketId).map(InvoiceResponse::from);
+    }
+
+    /** Shop-scoped read: another shop's invoice is "not found". */
+    public Optional<InvoiceResponse> findByTicket(UUID ticketId, UUID callerShopId) {
+        return invoiceRepository.findByTicketId(ticketId)
+                .filter(i -> callerShopId != null && callerShopId.equals(i.getShopId()))
+                .map(InvoiceResponse::from);
     }
 
     @Transactional(readOnly = true)
