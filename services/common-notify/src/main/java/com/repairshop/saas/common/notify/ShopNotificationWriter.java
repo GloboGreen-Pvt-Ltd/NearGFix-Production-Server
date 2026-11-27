@@ -39,6 +39,25 @@ public class ShopNotificationWriter {
     }
 
     /**
+     * One row, at most once per (shop, eventKey) — migration 130's unique index
+     * makes a retried / concurrent / re-processed event a no-op. A null
+     * eventKey always inserts. Returns the new row's id, or null when this
+     * event was already recorded.
+     */
+    public UUID insertOnce(UUID shopId, String type, String statusKey, String title, String body,
+                           UUID bookingId, String bookingNumber, UUID ticketId, String entityRef, String eventKey) {
+        UUID id = UUID.randomUUID();
+        int n = jdbc.update(
+                "INSERT INTO shop_notifications " +
+                "(id, shop_id, booking_id, booking_number, ticket_id, status_key, title, body, type, entity_ref, event_key, is_read, created_at) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false, now()) " +
+                "ON CONFLICT (shop_id, event_key) WHERE event_key IS NOT NULL DO NOTHING",
+                id, shopId, bookingId, clip(bookingNumber, 60), ticketId, clip(statusKey, 100),
+                clip(title, 200), body, clip(type, 30), clip(entityRef, 100), clip(eventKey, 200));
+        return n > 0 ? id : null;
+    }
+
+    /**
      * The same row for every active shop, as one INSERT ... SELECT. Active means
      * {@code shops.is_active = true} — the same filter the customer app's shop
      * directory uses, so a shop customers cannot see is not asked to quote

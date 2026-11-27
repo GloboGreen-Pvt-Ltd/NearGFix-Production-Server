@@ -3,13 +3,12 @@ package com.repairshop.saas.order.controller;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.repairshop.saas.order.entity.SellOrder;
-import com.repairshop.saas.order.entity.ShopNotification;
 import com.repairshop.saas.order.exception.ConflictException;
 import com.repairshop.saas.order.exception.ForbiddenException;
 import com.repairshop.saas.order.exception.ResourceNotFoundException;
 import com.repairshop.saas.order.repository.CustomerOrderRepository;
 import com.repairshop.saas.order.repository.SellOrderRepository;
-import com.repairshop.saas.order.repository.ShopNotificationRepository;
+import com.repairshop.saas.common.notify.PartnerNotifications;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
@@ -40,7 +39,7 @@ public class CustomerSellPurchaseController {
     private final JdbcTemplate jdbc;
     private final SellOrderRepository sellRepo;
     private final CustomerOrderRepository customerOrderRepo;
-    private final ShopNotificationRepository shopNotificationRepo;
+    private final PartnerNotifications partnerNotifications;
     private final ObjectMapper objectMapper;
 
     public record NoteRequest(String note) {}
@@ -239,9 +238,10 @@ public class CustomerSellPurchaseController {
 
     private void notifyShop(SellOrder s, String key, String title, String body) {
         if (s.getShopId() == null) return;
-        shopNotificationRepo.save(ShopNotification.builder()
-                .shopId(s.getShopId()).bookingId(s.getId()).bookingNumber(s.getSellNumber())
-                .statusKey(key).title(title).body(body).type("purchase").read(false).build());
+        // Feed row + push for allowlisted kinds only (PartnerNotificationPolicy). Each call is
+        // a distinct customer decision under the order's row lock, so no event key.
+        partnerNotifications.notify(PartnerNotifications.Event.of(s.getShopId(), "purchase", key, title)
+                .body(body).booking(s.getId(), s.getSellNumber()).kind("SELL_PURCHASE"));
     }
 
     private static String trim(String s, int max) {

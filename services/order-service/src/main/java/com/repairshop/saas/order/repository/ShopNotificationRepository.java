@@ -9,4 +9,5 @@ import java.util.UUID;
 public interface ShopNotificationRepository extends JpaRepository<ShopNotification, UUID> {
     List<ShopNotification> findByShopIdOrderByCreatedAtDesc(UUID shopId);
     long countByShopIdAndReadFalse(UUID shopId);
+    List<ShopNotification> findByShopIdAndReadFalse(UUID shopId);
 }

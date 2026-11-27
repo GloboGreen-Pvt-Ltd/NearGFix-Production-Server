@@ -21,6 +21,8 @@ public class ShopNotification {
     @Column(nullable = false, length = 200) private String title;
     @Column(columnDefinition = "TEXT") private String body;
     @Column(length = 30) private String type; // bookings | pickups | system
+    /** Record the row opens when it has no booking/ticket (Team rows: the employee). Migration 130. */
+    @Column(name = "entity_ref", length = 100, insertable = false, updatable = false) private String entityRef;
     @Column(name = "is_read", nullable = false) private boolean read;
     @Column(name = "created_at", nullable = false, updatable = false) private Instant createdAt;
 

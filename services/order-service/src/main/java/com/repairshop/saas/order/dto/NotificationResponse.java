@@ -19,6 +19,10 @@ public class NotificationResponse {
     private String title;
     private String body;
     private String type;
+    /** Partner feed only: SERVICE | PICKUP | SELL | BUY | TEAM (the tab the row belongs to). */
+    private String category;
+    /** Partner feed only: record the row opens when it has no booking/ticket. */
+    private String entityRef;
     private boolean read;
     private Instant createdAt;
 }

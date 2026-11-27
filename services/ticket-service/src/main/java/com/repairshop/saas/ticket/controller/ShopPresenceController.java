@@ -1,5 +1,6 @@
 package com.repairshop.saas.ticket.controller;
 
+import com.repairshop.saas.common.notify.PartnerNotifications;
 import com.repairshop.saas.common.presence.PresenceAvailability;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
@@ -45,6 +46,8 @@ public class ShopPresenceController {
     private final PlatformTransactionManager txManager;
     /** Shared availability rules + duty lookup; its timeout (default 90 s) also marks stale presence. */
     private final PresenceAvailability availability;
+    /** Partner Team notifications: Employee Outside Shop / Returned to Shop (after commit, once per session). */
+    private final PartnerNotifications partnerNotifications;
 
     // ------------------------------------------------------------ request models
 
@@ -85,6 +88,45 @@ public class ShopPresenceController {
                 "SELECT id, shop_id, user_id, name, role_label FROM technicians WHERE shop_id = ? AND user_id = ?", shopId, userId);
         if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Employee profile not found");
         return rows.get(0);
+    }
+
+    // ------------------------------------------------------------ partner notifications
+
+    private static final java.time.format.DateTimeFormatter CLOCK =
+            java.time.format.DateTimeFormatter.ofPattern("hh:mm a", Locale.ENGLISH);
+
+    /**
+     * Team notification for a confirmed presence transition — only ever called on the
+     * state change itself (after the grace period, accurate fix, not on authorized
+     * duty), so polling, GPS noise and unverified locations never notify. Raised inside
+     * the ping transaction, delivered after it commits; the event key (employee +
+     * outside-session start) makes each outside session notify once on exit and once
+     * on return, while a later session notifies again.
+     */
+    private void notifyPresence(Map<String, Object> t, UUID shopId, boolean exited, Instant at, Instant outsideSince) {
+        UUID techId = (UUID) t.get("id");
+        String name = t.get("name") == null || String.valueOf(t.get("name")).isBlank() ? null : String.valueOf(t.get("name")).trim();
+        String who = name == null ? "An employee" : "Employee " + name;
+        String clock = LocalTime.ofInstant(at, IST).format(CLOCK);
+        String body;
+        if (exited) {
+            body = who + " has been outside the shop since " + clock + ".";
+        } else {
+            long min = outsideSince == null ? 0 : Math.max(1, Math.round(secs(outsideSince, at) / 60.0));
+            body = who + " returned at " + clock + (min > 0 ? " after being outside for " + min + (min == 1 ? " minute." : " minutes.") : ".");
+        }
+        Instant session = exited ? at : (outsideSince != null ? outsideSince : at);
+        String key = exited ? "PRESENCE_OUTSIDE_SHOP" : "PRESENCE_RETURNED";
+        partnerNotifications.notify(PartnerNotifications.Event
+                .of(shopId, "team", key, exited ? "Employee Outside Shop" : "Employee Returned to Shop")
+                .body(body)
+                .entityRef(techId.toString())
+                .kind("TEAM_PRESENCE")
+                .data("technicianId", techId)
+                .data("employeeName", name)
+                .data("date", LocalDate.ofInstant(at, IST))
+                .data("at", at)
+                .eventKey(key + ":" + techId + ":" + session.toEpochMilli()));
     }
 
     // ------------------------------------------------------------ employee APIs
@@ -236,6 +278,7 @@ public class ShopPresenceController {
                         jdbc.update("UPDATE employee_presence_state SET state = 'INSIDE_SHOP', outside_since = NULL, pending_outside_since = NULL, "
                                 + "last_return_at = ? WHERE technician_id = ?", Timestamp.from(obs), techId);
                         if (record) event(techId, shopId, attId, "RETURNED", obs, distance, acc, radius, null, os == null ? null : secs(os, obs), "SERVER");
+                        notifyPresence(t, shopId, false, obs, os);
                     }
                 } else {
                     jdbc.update("UPDATE employee_presence_state SET state = 'INSIDE_SHOP', pending_outside_since = NULL WHERE technician_id = ?", techId);
@@ -250,6 +293,7 @@ public class ShopPresenceController {
                     jdbc.update("UPDATE employee_presence_state SET state = 'OUTSIDE_SHOP', outside_since = ?, pending_outside_since = NULL, "
                             + "last_exit_at = ? WHERE technician_id = ?", Timestamp.from(pending), Timestamp.from(pending), techId);
                     if (record) event(techId, shopId, attId, "EXITED", pending, distance, acc, radius, null, null, "SERVER");
+                    notifyPresence(t, shopId, true, pending, null);
                 }
             }
             return stateView(techId, attId, s, true, distance, null);

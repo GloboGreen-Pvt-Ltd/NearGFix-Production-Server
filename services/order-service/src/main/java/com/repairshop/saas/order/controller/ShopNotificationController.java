@@ -1,5 +1,6 @@
 package com.repairshop.saas.order.controller;
 
+import com.repairshop.saas.common.notify.PartnerNotificationPolicy;
 import com.repairshop.saas.order.dto.NotificationResponse;
 import com.repairshop.saas.order.entity.ShopNotification;
 import com.repairshop.saas.order.exception.ForbiddenException;
@@ -30,14 +31,21 @@ public class ShopNotificationController {
     @GetMapping
     public ResponseEntity<List<NotificationResponse>> list(HttpServletRequest req) {
         UUID shopId = shopCallerId(req);
-        return ResponseEntity.ok(
-                repo.findByShopIdOrderByCreatedAtDesc(shopId).stream().map(this::toResponse).toList());
+        return ResponseEntity.ok(repo.findByShopIdOrderByCreatedAtDesc(shopId).stream()
+                .filter(ShopNotificationController::supported).map(this::toResponse).toList());
     }
 
+    /** Unread rows the feed actually shows — suppressed (older) kinds never count. */
     @GetMapping("/unread-count")
     public ResponseEntity<Map<String, Long>> unreadCount(HttpServletRequest req) {
         UUID shopId = shopCallerId(req);
-        return ResponseEntity.ok(Map.of("count", repo.countByShopIdAndReadFalse(shopId)));
+        return ResponseEntity.ok(Map.of("count",
+                repo.findByShopIdAndReadFalse(shopId).stream().filter(ShopNotificationController::supported).count()));
+    }
+
+    /** Partner allowlist: rows of suppressed kinds stay in the table but are not listed or counted. */
+    private static boolean supported(ShopNotification n) {
+        return PartnerNotificationPolicy.allows(n.getType(), n.getStatusKey());
     }
 
     @PostMapping("/{id}/read")
@@ -69,7 +77,8 @@ public class ShopNotificationController {
                 .id(n.getId()).bookingId(n.getBookingId()).bookingNumber(n.getBookingNumber())
                 .ticketId(n.getTicketId())
                 .statusKey(n.getStatusKey()).title(n.getTitle()).body(n.getBody())
-                .type(n.getType()).read(n.isRead()).createdAt(n.getCreatedAt())
+                .type(n.getType()).category(PartnerNotificationPolicy.categoryOf(n.getType()))
+                .entityRef(n.getEntityRef()).read(n.isRead()).createdAt(n.getCreatedAt())
                 .build();
     }
 

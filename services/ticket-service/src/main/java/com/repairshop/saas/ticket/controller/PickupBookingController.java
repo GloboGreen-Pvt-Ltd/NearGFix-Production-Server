@@ -55,8 +55,8 @@ public class PickupBookingController {
     private final JdbcTemplate jdbc;
     private final TicketNumberService ticketNumberService;
     private final PushService pushService;
-    private final com.repairshop.saas.common.notify.ShopNotificationWriter shopNotifications;
-    private final com.repairshop.saas.common.notify.ShopPushService shopPush;
+    /** Partner feed row + push, allowlisted (PartnerNotificationPolicy) and once per event. */
+    private final com.repairshop.saas.common.notify.PartnerNotifications partnerNotifications;
 
     // Diagnostic ping — hit this in the browser to confirm the new controller
     // is loaded into the JVM. If this 200s but /me/pickup-bookings 500s, the
@@ -630,22 +630,18 @@ public class PickupBookingController {
             }
 
             // Shop owner — the pickup person moved this booking on: a feed row
-            // (Pickup tab) + a push to the Partner App (kind PICKUP). Best-effort.
+            // (Pickup tab) + a push to the Partner App (kind PICKUP), only for the
+            // allowlisted steps (Device Picked Up, Pickup Cancelled); the rest stay
+            // in the pickup timeline. Once per booking + status. Best-effort.
             try {
                 String who = me.getName() == null || me.getName().isBlank() ? "Pickup person" : me.getName().trim();
                 String shopTitle = labelFor(target);
                 String shopBody = who + " · Booking " + bookingNumber + " — " + labelFor(target);
                 UUID ticketUuid = mintedTicketId == null ? null : UUID.fromString(mintedTicketId);
-                UUID shopNotificationId = shopNotifications.insert(shopId, "pickups", target, shopTitle, shopBody,
-                        id, bookingNumber, ticketUuid);
-                Map<String, Object> data = new LinkedHashMap<>();
-                data.put("kind", "PICKUP");
-                data.put("notificationId", shopNotificationId.toString());
-                data.put("bookingId", id.toString());
-                if (mintedTicketId != null) data.put("ticketId", mintedTicketId);
-                data.put("bookingNumber", bookingNumber);
-                data.put("statusKey", target);
-                shopPush.pushToShop(shopId, shopTitle, shopBody, data);
+                partnerNotifications.notify(com.repairshop.saas.common.notify.PartnerNotifications.Event
+                        .of(shopId, "pickups", target, shopTitle).body(shopBody)
+                        .booking(id, bookingNumber).ticket(ticketUuid).kind("PICKUP")
+                        .eventKey("pickups:" + target + ":" + id));
             } catch (Exception e) {
                 log.warn("pickup-status: shop notification failed for {}: {}", id, e.getMessage());
             }
@@ -697,18 +693,24 @@ public class PickupBookingController {
                     "WHERE id = CAST(? AS UUID) AND handover_requested_at IS NULL", id.toString());
             String bookingNumber = stringFrom(access.booking, "booking_number");
             if (first > 0) appendEvent(id, "HANDOVER_REQUESTED", "Waiting for shop TPIN confirmation", "PICKUP_PERSON");
+            // One notification per handover request: a repeat tap keeps the first
+            // request time, so its event key (booking + request time) is unchanged.
             try {
                 String who = firstNonBlank(technicianRepository.findById(access.technicianId).map(Technician::getName).orElse(null), "Pickup person");
-                String title = "Device Received Confirmation";
-                String msg = who.trim() + " · Booking " + bookingNumber + " — confirm the device handover with your TPIN";
-                UUID nid = shopNotifications.insert(access.shopId, "pickups", "HANDOVER_REQUESTED", title, msg, id, bookingNumber, null);
-                Map<String, Object> data = new LinkedHashMap<>();
-                data.put("kind", "PICKUP");
-                data.put("notificationId", nid.toString());
-                data.put("bookingId", id.toString());
-                data.put("bookingNumber", bookingNumber);
-                data.put("statusKey", "HANDOVER_REQUESTED");
-                shopPush.pushToShop(access.shopId, title, msg, data);
+                Map<String, Object> hb = jdbc.queryForMap(
+                        "SELECT rb.handover_requested_at, NULLIF(trim(concat_ws(' ', mb.name, mm.name)), '') AS device " +
+                        "FROM repair_bookings rb LEFT JOIN master_models mm ON mm.id = rb.model_id " +
+                        "LEFT JOIN master_brands mb ON mb.id = rb.brand_id WHERE rb.id = CAST(? AS UUID)", id.toString());
+                Object requestedAt = hb.get("handover_requested_at");
+                String device = stringFrom(hb, "device");
+                String title = "Shop Handover Confirmation Required";
+                String msg = (device != null ? device : "A device") + " from pickup #" + bookingNumber
+                        + " is awaiting shop handover confirmation (" + who.trim() + "). Confirm with your TPIN.";
+                partnerNotifications.notify(com.repairshop.saas.common.notify.PartnerNotifications.Event
+                        .of(access.shopId, "pickups", "HANDOVER_REQUESTED", title).body(msg)
+                        .booking(id, bookingNumber).kind("PICKUP")
+                        .data("pickupPerson", who.trim())
+                        .eventKey("HANDOVER_REQUESTED:" + id + ":" + requestedAt));
             } catch (Exception e) {
                 log.warn("handover-request: shop notification failed for {}: {}", id, e.getMessage());
             }

@@ -4,11 +4,10 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.repairshop.saas.common.notify.PushApp;
 import com.repairshop.saas.common.notify.PushService;
-import com.repairshop.saas.common.notify.ShopPushService;
+import com.repairshop.saas.common.notify.PartnerNotifications;
 import com.repairshop.saas.order.dto.RepairBookingDtos.*;
 import com.repairshop.saas.order.entity.CustomerNotification;
 import com.repairshop.saas.order.entity.CustomerOrder;
-import com.repairshop.saas.order.entity.ShopNotification;
 import com.repairshop.saas.order.entity.PlatformTicket;
 import com.repairshop.saas.order.entity.RepairBooking;
 import com.repairshop.saas.order.entity.RepairBookingEvent;
@@ -49,14 +48,13 @@ public class RepairBookingController {
     private final RepairBookingEventRepository eventRepo;
     private final CustomerOrderRepository customerOrderRepo;
     private final com.repairshop.saas.order.repository.CustomerNotificationRepository notificationRepo;
-    private final com.repairshop.saas.order.repository.ShopNotificationRepository shopNotificationRepo;
     private final com.repairshop.saas.order.repository.PlatformTicketRepository platformTicketRepo;
     // Direct JDBC for customer + address enrichment — bypasses Hibernate entity
     // scanning so this works regardless of whether new @Entity classes are
     // picked up by the JPA bootstrap.
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
-    private final ShopPushService shopPush;
+    private final PartnerNotifications partnerNotifications;
     private final PushService pushService;
 
     @PostMapping
@@ -714,27 +712,15 @@ public class RepairBookingController {
     private void notifyShop(RepairBooking b, String statusKey, String title, String body,
                             String type, String kind) {
         if (b.getShopId() == null) return;
-        ShopNotification n = shopNotificationRepo.save(ShopNotification.builder()
-                .shopId(b.getShopId())
-                .bookingId(b.getId())
-                .bookingNumber(b.getBookingNumber())
-                // May be null before the booking is turned into a ticket; the
-                // owner app falls back to the Bookings tab in that case.
-                .ticketId(b.getTicketId())
-                .statusKey(statusKey)
-                .title(title)
+        // Allowlisted kinds only (PartnerNotificationPolicy); once per booking + status.
+        // ticketId may be null before the booking is turned into a ticket; the
+        // owner app falls back to the Bookings tab in that case.
+        partnerNotifications.notify(PartnerNotifications.Event.of(b.getShopId(), type, statusKey, title)
                 .body(body)
-                .type(type)
-                .read(false)
-                .build());
-        Map<String, Object> data = new HashMap<>();
-        data.put("kind", kind);
-        data.put("notificationId", String.valueOf(n.getId()));
-        data.put("bookingId", String.valueOf(b.getId()));
-        if (b.getBookingNumber() != null) data.put("bookingNumber", b.getBookingNumber());
-        if (b.getTicketId() != null) data.put("ticketId", b.getTicketId().toString());
-        data.put("statusKey", statusKey);
-        shopPush.pushToShop(b.getShopId(), title, body, data);
+                .booking(b.getId(), b.getBookingNumber())
+                .ticket(b.getTicketId())
+                .kind(kind)
+                .eventKey(type + ":" + statusKey + ":" + b.getId()));
     }
 
     private RepairBookingResponse toResponse(RepairBooking b) {

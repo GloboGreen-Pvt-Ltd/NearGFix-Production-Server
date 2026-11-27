@@ -54,6 +54,8 @@ public class TechnicianService {
     private final TechnicianExperienceRepository experienceRepository;
     private final JdbcTemplate jdbc;
     private final SubscriptionLimitService subscriptionLimits;
+    /** Partner Team notifications (Employee Checked In / Checked Out). */
+    private final com.repairshop.saas.common.notify.PartnerNotifications partnerNotifications;
 
     // 100m shop geofence for attendance punches — same radius the product spec
     // asked for (the pickup-person "Reached Shop" gate uses 50m separately).
@@ -584,8 +586,38 @@ public class TechnicianService {
         if (longitude != null) a.setCheckInLongitude(BigDecimal.valueOf(longitude));
         if (distanceMeters != null) a.setCheckInDistanceMeters(distanceMeters);
         if (notes != null && !notes.isBlank()) a.setNotes(notes);
+        // Session identity for the Team notification: a repeated check-in without a
+        // check-out in between keeps the same key (no second notification); a new
+        // check-in after a check-out is a new session.
+        LocalTime previousCheckOut = a.getCheckOutTime();
         a = attendanceRepository.save(a);
+        notifyAttendance(t, a, true, "ATTENDANCE_CHECKED_IN:" + a.getId() + ":"
+                + (previousCheckOut == null ? "first" : previousCheckOut));
         return toAttendanceRecord(a, t.getDefaultCheckIn());
+    }
+
+    /**
+     * Partner Team notification after a successful attendance punch. Written after
+     * the punch commits (a failed or rolled-back punch notifies nobody), once per
+     * session. The owner's own punches (owner-as-technician) don't notify the owner.
+     */
+    private void notifyAttendance(Technician t, TechnicianAttendance a, boolean in, String eventKey) {
+        if (t.isOwner() || t.getShopId() == null || a.getId() == null) return;
+        LocalTime at = in ? a.getCheckInTime() : a.getCheckOutTime();
+        String time = at == null ? "" : " at " + at.format(java.time.format.DateTimeFormatter.ofPattern("hh:mm a", java.util.Locale.ENGLISH));
+        String name = t.getName() == null || t.getName().isBlank() ? "An employee" : "Employee " + t.getName().trim();
+        partnerNotifications.notify(com.repairshop.saas.common.notify.PartnerNotifications.Event
+                .of(t.getShopId(), "team", in ? "ATTENDANCE_CHECKED_IN" : "ATTENDANCE_CHECKED_OUT",
+                        in ? "Employee Checked In" : "Employee Checked Out")
+                .body(name + (in ? " checked in" : " checked out") + time + ".")
+                .entityRef(t.getId().toString())
+                .kind("TEAM_ATTENDANCE")
+                .data("technicianId", t.getId())
+                .data("employeeName", t.getName())
+                .data("attendanceId", a.getId())
+                .data("date", a.getAttendanceDate())
+                .data("time", at)
+                .eventKey(eventKey));
     }
 
     /**
@@ -654,6 +686,8 @@ public class TechnicianService {
         if (longitude != null) a.setCheckOutLongitude(BigDecimal.valueOf(longitude));
         if (notes != null && !notes.isBlank()) a.setNotes(a.getNotes() != null ? a.getNotes() + "; " + notes : notes);
         a = attendanceRepository.save(a);
+        // One check-out notification per check-in session.
+        notifyAttendance(t, a, false, "ATTENDANCE_CHECKED_OUT:" + a.getId() + ":" + a.getCheckInTime());
         return toAttendanceRecord(a, t.getDefaultCheckIn());
     }
 

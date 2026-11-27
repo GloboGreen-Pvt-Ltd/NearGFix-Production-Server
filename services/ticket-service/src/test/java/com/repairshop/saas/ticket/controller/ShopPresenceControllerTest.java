@@ -1,6 +1,9 @@
 package com.repairshop.saas.ticket.controller;
 
+import com.repairshop.saas.common.notify.PartnerNotifications;
 import com.repairshop.saas.common.presence.PresenceAvailability;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -29,6 +32,7 @@ class ShopPresenceControllerTest {
 
     JdbcTemplate jdbc;
     ShopPresenceController c;
+    PartnerNotifications notifier;
     UUID shopId, userId, techId, attId;
 
     @BeforeEach
@@ -57,7 +61,8 @@ class ShopPresenceControllerTest {
         jdbc.update("INSERT INTO shops VALUES (?, 'Globo Green', ?, ?)", shopId, LAT, LNG);
         jdbc.update("INSERT INTO technicians VALUES (?, ?, ?, 'Nivetha', 'Technician')", techId, shopId, userId);
         jdbc.execute("CREATE TABLE tickets (id UUID, assigned_technician_id UUID, status VARCHAR(60))");
-        c = new ShopPresenceController(jdbc, new DataSourceTransactionManager(ds), new PresenceAvailability(jdbc, false, 90));
+        notifier = Mockito.mock(PartnerNotifications.class);
+        c = new ShopPresenceController(jdbc, new DataSourceTransactionManager(ds), new PresenceAvailability(jdbc, false, 90), notifier);
     }
 
     void checkIn() {
@@ -80,6 +85,55 @@ class ShopPresenceControllerTest {
 
     int events(String type) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM employee_presence_events WHERE event_type = ?", Integer.class, type);
+    }
+
+    /** Partner Team notifications raised so far, in order. */
+    List<PartnerNotifications.Event> notified() {
+        ArgumentCaptor<PartnerNotifications.Event> ev = ArgumentCaptor.forClass(PartnerNotifications.Event.class);
+        Mockito.verify(notifier, Mockito.atLeast(0)).notify(ev.capture());
+        return ev.getAllValues();
+    }
+
+    @Test
+    void outsideAndReturnNotifyTheOwnerOncePerSession() {
+        checkIn();
+        ping(20, 5, 590);
+        ping(150, 5, 560);                       // pending, inside the grace period
+        assertTrue(notified().isEmpty(), "no notification during the grace period");
+        ping(150, 5, 400);                       // confirmed outside (160 s > 120 s grace)
+        ping(160, 5, 380); ping(170, 5, 360);    // still outside: polling must not repeat it
+        List<PartnerNotifications.Event> ev = notified();
+        assertEquals(1, ev.size());
+        assertEquals("PRESENCE_OUTSIDE_SHOP", ev.get(0).statusKey());
+        assertEquals("Employee Outside Shop", ev.get(0).title());
+        assertEquals("team", ev.get(0).type());
+        assertEquals(shopId, ev.get(0).shopId());
+        assertTrue(ev.get(0).body().startsWith("Employee Nivetha has been outside the shop since "), ev.get(0).body());
+
+        ping(10, 5, 260);                        // back inside: outside -560 s -> -260 s = 5 minutes
+        ev = notified();
+        assertEquals(2, ev.size());
+        assertEquals("PRESENCE_RETURNED", ev.get(1).statusKey());
+        assertTrue(ev.get(1).body().endsWith("after being outside for 5 minutes."), ev.get(1).body());
+        ping(12, 5, 250);                        // inside again: no second return
+        assertEquals(2, notified().size());
+
+        ping(150, 5, 200); ping(150, 5, 50);     // a new outside session the same day
+        ev = notified();
+        assertEquals(3, ev.size());
+        assertEquals("PRESENCE_OUTSIDE_SHOP", ev.get(2).statusKey());
+        assertNotEquals(ev.get(0).eventKey(), ev.get(2).eventKey(), "each outside session has its own identity");
+    }
+
+    @Test
+    void noPresenceNotificationForDutyGpsErrorsOrInaccuracy() {
+        checkIn();
+        ping(500, 300, 600); ping(500, 300, 500);  // far but inaccurate fixes
+        c.ping(req(false, shopId), new ShopPresenceController.PingRequest(null, null, null,
+                Instant.now().minusSeconds(400).toEpochMilli(), "LOCATION_PERMISSION_DENIED", null)); // GPS off
+        jdbc.update("INSERT INTO repair_bookings VALUES ('BK1', ?, 'PICKUP_ON_THE_WAY')", techId);
+        ping(2000, 5, 200); ping(2000, 5, 50);     // authorized field duty
+        assertTrue(notified().isEmpty());
     }
 
     @Test

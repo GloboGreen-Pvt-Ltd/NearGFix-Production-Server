@@ -128,13 +128,19 @@ ensure_env_file() {
   if [[ -z "$expo_access_token" ]]; then
     expo_access_token="$(read_env_value EXPO_ACCESS_TOKEN)"
   fi
+  #
+  # The workflow's explicit value (repo variable PUSH_ENABLED) wins; empty keeps
+  # what is on the box; neither means true — PushService's own default. Previously
+  # an unset variable defaulted to false, that false was written to .env, and the
+  # "false on the box can't be undone" rule then kept every Partner push off for
+  # good (registration kept working, so nothing looked broken). Kill switch now:
+  # repo variable PUSH_ENABLED=false, or PUSH_ENABLED=false in .env with the
+  # repo variable unset.
   push_enabled="${PUSH_ENABLED:-}"
   if [[ -z "$push_enabled" ]]; then
     push_enabled="$(read_env_value PUSH_ENABLED)"
   fi
-  push_enabled="${push_enabled:-false}"
-  # A false already on the box is a kill switch the workflow cannot undo.
-  [[ "$(read_env_value PUSH_ENABLED)" == "false" ]] && push_enabled=false
+  push_enabled="${push_enabled:-true}"
 
   # FCM (Firebase Admin SDK, common-notify). The service-account key never
   # touches this box's disk or .env: the services read it from AWS Secrets
@@ -149,12 +155,15 @@ ensure_env_file() {
     firebase_secret_region="$(read_env_value FIREBASE_CREDENTIALS_SECRET_REGION)"
   fi
   firebase_secret_region="${firebase_secret_region:-${aws_region:-ap-south-1}}"
+  # Same rule as PUSH_ENABLED: explicit workflow value, else the box's, else on
+  # when a Firebase secret is configured (FcmSender's own default) — off without one.
   fcm_enabled="${FCM_ENABLED:-}"
   if [[ -z "$fcm_enabled" ]]; then
     fcm_enabled="$(read_env_value FCM_ENABLED)"
   fi
-  fcm_enabled="${fcm_enabled:-false}"
-  [[ "$(read_env_value FCM_ENABLED)" == "false" ]] && fcm_enabled=false
+  if [[ -z "$fcm_enabled" ]]; then
+    if [[ -n "$firebase_secret_id" ]]; then fcm_enabled=true; else fcm_enabled=false; fi
+  fi
 
   # BotBee WhatsApp booking confirmations (ticket-service). Same rule: the
   # workflow's value when passed, else what is already on the box. Sending
