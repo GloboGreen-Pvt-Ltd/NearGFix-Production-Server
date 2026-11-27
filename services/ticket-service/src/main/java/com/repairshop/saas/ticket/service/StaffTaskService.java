@@ -195,6 +195,9 @@ public class StaffTaskService {
     // (kind STAFF_TASK, opens the task). After commit, on the push thread, so it
     // can never undo the employee's status change.
     private void notifyShopOfEmployeeStatus(StaffTask t, UUID technicianId, String status, String note) {
+        // Partner allowlist: only "Task not completed" notifies; started / completed / updated
+        // stay in the task's history (PartnerNotificationPolicy).
+        if (!com.repairshop.saas.common.notify.PartnerNotificationPolicy.allows("team", "STAFF_TASK_" + status)) return;
         String who = technicianRepository.findByShopIdAndId(t.getShopId(), technicianId)
                 .map(Technician::getName).filter(n -> n != null && !n.isBlank()).map(String::trim)
                 .orElse("An employee");

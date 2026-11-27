@@ -58,6 +58,9 @@ public class PushService {
         this.expo = expo;
         // Parsed by hand: a blank PUSH_ENABLED= in .env must not stop the service booting.
         this.enabled = !"false".equalsIgnoreCase(enabled == null ? "" : enabled.trim());
+        // Registration keeps working while sending is off, so say so once at startup —
+        // otherwise a disabled box looks healthy and every push silently goes nowhere.
+        if (!this.enabled) log.warn("Push sending is OFF (PUSH_ENABLED=false): device tokens register, but no push is delivered");
         // Two senders and a bounded queue: a burst (a sell request fanned out to
         // every shop) queues up behind them instead of spawning threads, and a
         // backlog beyond that is dropped and logged rather than eating memory.

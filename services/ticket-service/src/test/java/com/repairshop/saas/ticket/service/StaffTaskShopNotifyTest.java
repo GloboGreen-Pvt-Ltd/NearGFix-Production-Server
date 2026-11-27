@@ -53,14 +53,23 @@ class StaffTaskShopNotifyTest {
     }
 
     @Test
-    @SuppressWarnings("unchecked")
-    void employeeCompletingATaskNotifiesTheOwner() {
+    void employeeCompletingATaskIsNotAPartnerNotification() {
+        // Partner allowlist: task completion stays in the task history only.
         service.setStatus(shopId, taskId, techId, new StatusRequest("COMPLETED", null));
 
-        verify(feed).insert(eq(shopId), eq("team"), eq("STAFF_TASK_COMPLETED"), eq("Task completed"),
-                eq("Nivetha · Paal packet vangittu vaaa"), isNull(), isNull(), isNull());
+        verifyNoInteractions(feed);
+        verify(shopPush, never()).pushToShop(any(), any(), any(), anyMap());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void unableToCompleteNotifiesTheOwner() {
+        service.setStatus(shopId, taskId, techId, new StatusRequest("INCOMPLETE", "Shop closed"));
+
+        verify(feed).insert(eq(shopId), eq("team"), eq("STAFF_TASK_INCOMPLETE"), eq("Task not completed"),
+                eq("Nivetha · Paal packet vangittu vaaa — Shop closed"), isNull(), isNull(), isNull());
         ArgumentCaptor<Map<String, Object>> data = ArgumentCaptor.forClass(Map.class);
-        verify(shopPush).pushToShop(eq(shopId), eq("Task completed"), eq("Nivetha · Paal packet vangittu vaaa"), data.capture());
+        verify(shopPush).pushToShop(eq(shopId), eq("Task not completed"), eq("Nivetha · Paal packet vangittu vaaa — Shop closed"), data.capture());
         assertEquals("STAFF_TASK", data.getValue().get("kind"));
         assertEquals(taskId.toString(), data.getValue().get("taskId"));
     }

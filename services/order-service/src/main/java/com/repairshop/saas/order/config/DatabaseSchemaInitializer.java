@@ -28,6 +28,10 @@ public class DatabaseSchemaInitializer {
             addColumnIfMissing("marketplace_listings", "sell_order_id", "UUID");
             // ShopNotification maps it (migration 86).
             addColumnIfMissing("shop_notifications", "ticket_id", "UUID");
+            // ShopNotification maps entity_ref; event_key backs PartnerNotifications'
+            // de-duplication (migration 130 adds both plus the unique index).
+            addColumnIfMissing("shop_notifications", "entity_ref", "VARCHAR(100)");
+            addColumnIfMissing("shop_notifications", "event_key", "VARCHAR(200)");
             // Partner purchase workflow on sell orders (migration 110).
             String[][] sell = {
                     {"assigned_pickup_person_id", "UUID"}, {"pickup_person_name", "VARCHAR(120)"}, {"pickup_person_phone", "VARCHAR(30)"},

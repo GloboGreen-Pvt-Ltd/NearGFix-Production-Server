@@ -202,8 +202,10 @@ public class ChatService {
         if (orderNo != null) data.put("orderNumber", orderNo);
         if (!titles.isEmpty()) data.put("productTitle", titles.get(0));
         shopPush.afterCommit(() -> {
-            UUID notificationId = shopNotifications.insert(shopId, "buy", "BUY_ORDER_PLACED",
-                    title, text, null, orderNo, null);
+            // One row + push per order number (a re-sent order message must not repeat it).
+            UUID notificationId = shopNotifications.insertOnce(shopId, "buy", "BUY_ORDER_PLACED",
+                    title, text, null, orderNo, null, null, orderNo == null ? null : "BUY_ORDER_PLACED:" + orderNo);
+            if (notificationId == null) return;
             data.put("notificationId", notificationId.toString());
             shopPush.pushToShop(shopId, title, text, data);
         });

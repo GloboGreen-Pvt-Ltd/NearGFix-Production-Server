@@ -1,22 +1,21 @@
 package com.repairshop.saas.marketplace.service;
 
+import com.repairshop.saas.common.notify.PartnerNotifications;
 import com.repairshop.saas.marketplace.dto.EnquiryResponse;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.dao.DataAccessException;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
-import java.util.UUID;
 
 /**
  * Owner Dashboard bell rows (shop_notifications, migration 29) for marketplace
- * enquiries. Same shared database and same best-effort INSERT as ticket-service's
- * PickupBookingController.notifyShop; no cross-service call. type='sell_enquiry' puts the
- * row on the Partner app's Sell notification tab and opens Buyer Enquiries
- * (plain 'sell' is the customer Sell Requests feed).
+ * enquiries, written through common-notify's PartnerNotifications: allowlisted kinds
+ * only (New Enquiry, New Purchase Request, New Counter-Offer — "Offer accepted" stays
+ * in the enquiry thread), plus the push to the shop's devices. type='sell_enquiry'
+ * puts the row on the Partner app's Buy tab (a customer buying from the shop) and
+ * opens Buyer Enquiries.
  *
  * Call only AFTER the enquiry transaction has committed (the controllers do), so
  * a failed insert can never roll back or abort the enquiry change.
@@ -27,37 +26,38 @@ public class ShopNotificationWriter {
 
     private static final Logger log = LoggerFactory.getLogger(ShopNotificationWriter.class);
 
-    private final JdbcTemplate jdbc;
+    private final PartnerNotifications partnerNotifications;
 
     public void enquiryCreated(EnquiryResponse e) {
         boolean purchase = EnquiryService.PURCHASE_REQUEST.equals(e.getKind());
         String body = buyer(e) + (purchase ? " wants to buy " : " asked about ") + product(e)
                 + (e.getLastOfferAmount() != null ? " and offered " + money(e.getLastOfferAmount()) : "") + ".";
-        insert(e.getShopId(), purchase ? "MARKETPLACE_PURCHASE_REQUEST" : "MARKETPLACE_ENQUIRY",
-                purchase ? "New purchase request" : "New enquiry", body);
+        String key = purchase ? "MARKETPLACE_PURCHASE_REQUEST" : "MARKETPLACE_ENQUIRY";
+        // One per enquiry, however often the create is retried.
+        insert(e, key, purchase ? "New purchase request" : "New enquiry", body,
+                e.getId() == null ? null : key + ":" + e.getId());
     }
 
     public void counterOffer(EnquiryResponse e) {
-        insert(e.getShopId(), "MARKETPLACE_ENQUIRY_COUNTERED", "New counter-offer",
-                buyer(e) + " offered " + money(e.getLastOfferAmount()) + " for " + product(e) + ".");
+        // Each counter-offer is a new event (no key): a negotiation can have several.
+        insert(e, "MARKETPLACE_ENQUIRY_COUNTERED", "New counter-offer",
+                buyer(e) + " offered " + money(e.getLastOfferAmount()) + " for " + product(e) + ".", null);
     }
 
     public void offerAccepted(EnquiryResponse e) {
-        insert(e.getShopId(), "MARKETPLACE_ENQUIRY_ACCEPTED", "Offer accepted",
+        // Not on the Partner allowlist: the policy drops it (kept so the allowlist alone decides).
+        insert(e, "MARKETPLACE_ENQUIRY_ACCEPTED", "Offer accepted",
                 buyer(e) + " accepted " + money(e.getAgreedAmount()) + " for " + product(e)
-                        + ". Confirm the sale to update your stock.");
+                        + ". Confirm the sale to update your stock.", null);
     }
 
-    private void insert(UUID shopId, String statusKey, String title, String body) {
-        if (shopId == null) return;
+    private void insert(EnquiryResponse e, String statusKey, String title, String body, String eventKey) {
+        if (e.getShopId() == null) return;
         try {
-            jdbc.update(
-                    "INSERT INTO shop_notifications " +
-                            "(id, shop_id, status_key, title, body, type, is_read, created_at) " +
-                            "VALUES (CAST(? AS UUID), CAST(? AS UUID), ?, ?, ?, 'sell_enquiry', false, now())",
-                    UUID.randomUUID().toString(), shopId.toString(), statusKey, title, body);
-        } catch (DataAccessException ex) {
-            log.warn("marketplace shop notification skipped for shop {}: {}", shopId, ex.getMessage());
+            partnerNotifications.notify(PartnerNotifications.Event.of(e.getShopId(), "sell_enquiry", statusKey, title)
+                    .body(body).kind("BUY_ENQUIRY").data("enquiryId", e.getId()).eventKey(eventKey));
+        } catch (RuntimeException ex) {
+            log.warn("marketplace shop notification skipped for shop {}: {}", e.getShopId(), ex.getMessage());
         }
     }
 

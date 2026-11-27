@@ -72,6 +72,8 @@ public class SellPickupController {
     private final TechnicianRepository technicianRepository;
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
+    /** Partner feed row + push, allowlisted (PartnerNotificationPolicy). */
+    private final com.repairshop.saas.common.notify.PartnerNotifications partnerNotifications;
 
     public record StatusRequest(String status, String note, Map<String, Object> inspection, Double latitude, Double longitude) {}
     public record DeclineRequest(String reason, String note) {}
@@ -547,10 +549,22 @@ public class SellPickupController {
                 UUID.randomUUID(), s.get("customer_user_id"), s.get("id"), s.get("sell_number"), key, title, body);
     }
 
+    /**
+     * Sell tab (type purchase). Only the allowlisted steps — pickup failed / declined,
+     * inspection submitted, final price accepted / declined, customer paid — create a
+     * row and a push; routine progress stays in the sell order's history. Written after
+     * the step commits; each call is a distinct step under the order's lock (no event key:
+     * a pickup can legitimately fail or be declined again after a reassignment).
+     */
     private void notifyShop(Map<String, Object> s, String key, String title, String body) {
-        jdbc.update("INSERT INTO shop_notifications (id, shop_id, booking_id, booking_number, status_key, title, body, type, is_read, created_at) "
-                        + "VALUES (?, ?, ?, ?, ?, ?, ?, 'purchase', false, now())",
-                UUID.randomUUID(), s.get("shop_id"), s.get("id"), s.get("sell_number"), key, title, body);
+        Object shop = s.get("shop_id");
+        if (shop == null) return;
+        Object id = s.get("id");
+        partnerNotifications.notify(com.repairshop.saas.common.notify.PartnerNotifications.Event
+                .of(UUID.fromString(String.valueOf(shop)), "purchase", key, title).body(body)
+                .booking(id == null ? null : UUID.fromString(String.valueOf(id)),
+                        s.get("sell_number") == null ? null : String.valueOf(s.get("sell_number")))
+                .kind("SELL_PURCHASE"));
     }
 
     private Technician me(HttpServletRequest req) {

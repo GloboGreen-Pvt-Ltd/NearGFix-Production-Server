@@ -420,7 +420,9 @@ public class SellOrderController {
             co.setStatus("CANCELLED");
             customerOrderRepo.save(co);
         });
-        if (!wasCancelled && s.getShopId() != null) {
+        // Not on the Partner allowlist (PartnerNotificationPolicy) — the cancel stays in the order's history.
+        if (!wasCancelled && s.getShopId() != null
+                && com.repairshop.saas.common.notify.PartnerNotificationPolicy.allows("purchase", "SELL_CANCELLED_BY_CUSTOMER")) {
             shopNotificationRepo.save(ShopNotification.builder()
                     .shopId(s.getShopId()).bookingId(s.getId()).bookingNumber(s.getSellNumber())
                     .statusKey("SELL_CANCELLED_BY_CUSTOMER").title("Sale cancelled by the customer")

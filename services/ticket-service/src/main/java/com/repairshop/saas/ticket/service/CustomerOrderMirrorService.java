@@ -312,6 +312,8 @@ public class CustomerOrderMirrorService {
         String key = statusKey.toUpperCase();
         String[] template = SHOP_NOTIFICATION_TEMPLATES.get(key);
         if (template == null) return;
+        // Partner allowlist: routine technician progress stays on the booking timeline only.
+        if (!com.repairshop.saas.common.notify.PartnerNotificationPolicy.allows("bookings", key)) return;
         bookingRepo.findById(bookingId).ifPresent(booking -> {
             UUID shopId = booking.getShopId();
             if (shopId == null) return; // no shop has taken the job on yet
