@@ -53,6 +53,8 @@ public class SecurityConfig {
                         .requestMatchers("/master/models/media-path/preview").authenticated()
                         .requestMatchers("/master/device-categories/*/image").authenticated()
                         .requestMatchers("/master/brands/*/image").authenticated()
+                        // Bulk logo upload: platform admins only (admin portal token role).
+                        .requestMatchers("/master/brands/bulk-logo/**").hasAnyRole("SUPER_ADMIN", "ADMIN")
                         .requestMatchers("/master/banners/*/image").authenticated()
                         .requestMatchers("/master/model-compatibility/*/image").authenticated()
                         // Every call is a paid Google Cloud Vision request.

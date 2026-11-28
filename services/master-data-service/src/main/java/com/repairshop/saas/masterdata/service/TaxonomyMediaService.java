@@ -122,16 +122,38 @@ public class TaxonomyMediaService {
     public TaxonomyImageResponse uploadBrandImage(UUID brandId, MultipartFile file) {
         MasterBrand brand = brandRepo.findById(brandId)
                 .orElseThrow(() -> new MediaValidationException("No brand with id " + brandId + "."));
+        return storeBrandImage(brand, validator.validateImage(file), false);
+    }
 
-        MediaUploadValidator.ValidatedUpload upload = validator.validateImage(file);
+    /**
+     * Store an already-validated logo and point the brand's image_url at it — the
+     * single upload above and the bulk upload (BrandBulkLogoService) share this.
+     *
+     * The object goes to a fresh unique key first; the row is updated only after
+     * that succeeds, and the object is removed again if the update fails, so a
+     * failed replacement leaves the existing logo untouched. The superseded object
+     * is deleted only once the row has moved on (removeSuperseded).
+     *
+     * @param onlyIfMissing refuse if the brand already has a logo — checked before
+     *                      the upload and again under the row lock, so a concurrent
+     *                      upload is never overwritten. Throws
+     *                      {@link LogoAlreadyPresentException}; nothing is changed.
+     */
+    public TaxonomyImageResponse storeBrandImage(MasterBrand brand, MediaUploadValidator.ValidatedUpload upload,
+                                                 boolean onlyIfMissing) {
+        UUID brandId = brand.getId();
+        if (onlyIfMissing && hasLogo(brand)) throw new LogoAlreadyPresentException(brand.getName());
         String key = MediaKeys.masterBrandImageKey(brand.getName(), upload.extension());
-        String previousUrl = brand.getImageUrl();
         String url = storage.put(key, upload.bytes(), upload.contentType());
 
         MasterBrand saved;
+        String[] previous = new String[1];
         try {
             saved = tx.execute(status -> {
-                MasterBrand row = brandRepo.findById(brandId).orElseThrow();
+                MasterBrand row = brandRepo.lockById(brandId)
+                        .orElseThrow(() -> new MediaValidationException("No brand with id " + brandId + "."));
+                if (onlyIfMissing && hasLogo(row)) throw new LogoAlreadyPresentException(row.getName());
+                previous[0] = row.getImageUrl();
                 row.setImageUrl(url);
                 row.setImageBase64(null);
                 MasterBrand updated = brandRepo.save(row);
@@ -139,11 +161,14 @@ public class TaxonomyMediaService {
                 return updated;
             });
         } catch (RuntimeException e) {
-            log.error("Brand {} update failed after upload; removing orphaned object {}", brandId, key, e);
+            if (!(e instanceof LogoAlreadyPresentException)) {
+                log.error("Brand {} update failed after upload; removing orphaned object {}", brandId, key, e);
+            }
             storage.deleteQuietly(key);
             throw e;
         }
 
+        String previousUrl = previous[0];
         boolean previousRemoved = removeSuperseded(previousUrl, key, MediaKeys.MASTER_BRANDS_ROOT,
                 () -> brandRepo.countByImageUrl(previousUrl));
         return new TaxonomyImageResponse(saved.getId(), saved.getName(), key, saved.getImageUrl(),
@@ -309,6 +334,19 @@ public class TaxonomyMediaService {
      *                        Evaluated only once the cheaper checks pass, so the common
      *                        "nothing of ours to delete" case costs no query.
      */
+    /** True when the brand shows a logo today: an image URL or a legacy inline image. */
+    public static boolean hasLogo(MasterBrand b) {
+        return (b.getImageUrl() != null && !b.getImageUrl().isBlank())
+                || (b.getImageBase64() != null && !b.getImageBase64().isBlank());
+    }
+
+    /** A "missing logos only" upload found the brand already has a logo; nothing was changed. */
+    public static class LogoAlreadyPresentException extends RuntimeException {
+        public LogoAlreadyPresentException(String brandName) {
+            super("\"" + brandName + "\" already has a logo. Choose \"Replace existing logos\" to overwrite it.");
+        }
+    }
+
     private boolean removeSuperseded(String previousUrl, String newKey, String root,
                                      LongSupplier stillReferenced) {
         String previousKey = props.keyForPublicUrl(previousUrl);
