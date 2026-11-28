@@ -53,3 +53,8 @@ app:
     token: ${IMEI_API_TOKEN:}
     # 0 = "Basic IMEI Check" (brand/model/model-numbers, token based).
     service-id: ${IMEI_API_SERVICE_ID:0}
+
+# Bulk brand logo upload (admin portal): images per batch (BrandBulkLogoService).
+master:
+  bulk-logo:
+    max-files: ${BULK_LOGO_MAX_FILES:200}
